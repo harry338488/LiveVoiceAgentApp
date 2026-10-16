@@ -159,12 +159,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
                 conversationSnapshotProvider = { _uiState.value.currentSession.messages }
             )
         } else {
+            val offlineTurnIdx = (state.currentSession.messages.maxOfOrNull { it.turnIndex } ?: state.currentSession.messages.size) + 1
             onTranscriptDelta(
                 role = MessageRole.USER,
                 delta = text.trim(),
                 timelineMs = System.currentTimeMillis(),
                 modelTag = "User (離線文字提問)",
-                streamKey = "offline_user_${UUID.randomUUID().toString().take(8)}"
+                streamKey = "offline_user_${offlineTurnIdx}",
+                turnIndex = offlineTurnIdx
             )
             _uiState.update {
                 it.copy(statusBanner = "正在呼叫後端模型 ${state.settings.backendBrainModel}...")
@@ -174,7 +176,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
                     settings = state.settings,
                     conversationHistory = _uiState.value.currentSession.messages,
                     onSearchExecuted = { searchRes ->
-                        onSearchCardAdded(searchRes)
+                        onSearchCardAdded(searchRes, offlineTurnIdx)
                     },
                     onCalendarActionLogged = { calNote ->
                         onTranscriptDelta(
@@ -182,7 +184,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
                             delta = calNote,
                             timelineMs = System.currentTimeMillis(),
                             modelTag = "Android Calendar",
-                            streamKey = "offline_cal_${UUID.randomUUID().toString().take(8)}"
+                            streamKey = "offline_cal_${offlineTurnIdx}",
+                            turnIndex = offlineTurnIdx
                         )
                     }
                 )
@@ -192,7 +195,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
                         delta = brain.detailedNotes,
                         timelineMs = System.currentTimeMillis(),
                         modelTag = state.settings.backendBrainModel,
-                        streamKey = "offline_backend_${UUID.randomUUID().toString().take(8)}"
+                        streamKey = "offline_backend_${offlineTurnIdx}",
+                        turnIndex = offlineTurnIdx
+                    )
+                    onTranscriptDelta(
+                        role = MessageRole.ASSISTANT_VOICE,
+                        delta = brain.spokenSummary,
+                        timelineMs = System.currentTimeMillis(),
+                        modelTag = state.settings.backendBrainModel,
+                        streamKey = "offline_voice_${offlineTurnIdx}",
+                        turnIndex = offlineTurnIdx
                     )
                     onTurnCompleted()
                     _uiState.update { it.copy(statusBanner = "後端回覆完成（已自動儲存至對話紀錄）") }
