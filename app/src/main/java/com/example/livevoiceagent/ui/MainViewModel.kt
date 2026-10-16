@@ -261,7 +261,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
         if (current.isTitleAiGenerated) return
         val hasUser = current.messages.any { it.role == MessageRole.USER && it.text.length >= 2 }
         val hasAi = current.messages.any {
-            (it.role == MessageRole.ASSISTANT_VOICE || it.role == MessageRole.BACKEND_BRAIN) && it.text.length >= 6
+            it.role != MessageRole.USER && (it.text.length >= 6 || it.backendThinkingText.length >= 6)
         }
         if (!hasUser || !hasAi) return
         if (!isGeneratingTitle.compareAndSet(false, true)) return
@@ -321,41 +321,151 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
         persistCurrentSession()
     }
 
+    private fun sortMessagesByTurn(msgs: List<ChatMessage>): List<ChatMessage> {
+        return msgs.sortedWith { a, b ->
+            if (a.turnIndex > 0 && b.turnIndex > 0) {
+                val turnCmp = a.turnIndex.compareTo(b.turnIndex)
+                if (turnCmp != 0) turnCmp else a.role.sortPriorityInTurn.compareTo(b.role.sortPriorityInTurn)
+            } else {
+                0
+            }
+        }
+    }
+
     /**
-     * Merges incoming deltas by `streamKey` in-place so concurrent streams (User speech, Assistant Voice,
-     * Backend Brain, and Linkup Search) NEVER interrupt or fragment each other!
+     * Strict Turn + Thinking-Mode Drawer Merger:
+     * - Each turn has at most ONE `USER` bubble and ONE `ASSISTANT_VOICE` bubble.
+     * - Backend Brain reasoning/notes (`BACKEND_BRAIN`), Linkup searches (`WEB_SEARCH`), and Calendar actions (`SYSTEM`)
+     *   are embedded directly inside that turn's `ASSISTANT_VOICE` bubble as a collapsible "Thinking & Tools" drawer!
+     * - This guarantees User speech and Assistant Voice speech are NEVER interrupted or split into fragments.
      */
     override fun onTranscriptDelta(
         role: MessageRole,
         delta: String,
         timelineMs: Long,
         modelTag: String,
-        streamKey: String
+        streamKey: String,
+        turnIndex: Int
     ) {
         _uiState.update { state ->
             val currentMsgs = state.currentSession.messages.toMutableList()
-            val existingIdx = currentMsgs.indexOfLast { it.streamKey == streamKey }
+            val frontModelName = state.settings.frontendVoiceModel
+            val backModelName = state.settings.backendBrainModel
 
-            if (existingIdx >= 0) {
-                val existing = currentMsgs[existingIdx]
-                currentMsgs[existingIdx] = existing.copy(
-                    text = existing.text + delta,
-                    timestampMs = System.currentTimeMillis()
-                )
-            } else {
-                currentMsgs.add(
-                    ChatMessage(
-                        streamKey = streamKey,
-                        role = role,
-                        text = delta,
-                        sessionTimelineMs = timelineMs,
-                        modelTag = modelTag
-                    )
-                )
+            when (role) {
+                MessageRole.USER -> {
+                    val existingIdx = currentMsgs.indexOfLast {
+                        (turnIndex > 0 && it.turnIndex == turnIndex && it.role == MessageRole.USER) ||
+                                it.streamKey == streamKey
+                    }
+                    if (existingIdx >= 0) {
+                        val existing = currentMsgs[existingIdx]
+                        currentMsgs[existingIdx] = existing.copy(
+                            text = existing.text + delta,
+                            timestampMs = System.currentTimeMillis()
+                        )
+                    } else {
+                        currentMsgs.add(
+                            ChatMessage(
+                                streamKey = streamKey,
+                                turnIndex = turnIndex,
+                                role = MessageRole.USER,
+                                text = delta,
+                                sessionTimelineMs = timelineMs,
+                                modelTag = modelTag
+                            )
+                        )
+                    }
+                }
+
+                MessageRole.ASSISTANT_VOICE -> {
+                    val existingIdx = currentMsgs.indexOfLast {
+                        (turnIndex > 0 && it.turnIndex == turnIndex && it.role == MessageRole.ASSISTANT_VOICE) ||
+                                it.streamKey == streamKey
+                    }
+                    if (existingIdx >= 0) {
+                        val existing = currentMsgs[existingIdx]
+                        currentMsgs[existingIdx] = existing.copy(
+                            text = existing.text + delta,
+                            modelTag = existing.modelTag.ifBlank { modelTag },
+                            timestampMs = System.currentTimeMillis()
+                        )
+                    } else {
+                        currentMsgs.add(
+                            ChatMessage(
+                                streamKey = streamKey,
+                                turnIndex = turnIndex,
+                                role = MessageRole.ASSISTANT_VOICE,
+                                text = delta,
+                                backendModelTag = backModelName,
+                                sessionTimelineMs = timelineMs,
+                                modelTag = modelTag.ifBlank { frontModelName }
+                            )
+                        )
+                    }
+                }
+
+                MessageRole.BACKEND_BRAIN -> {
+                    // Attach Backend Brain output directly into the collapsible Thinking Drawer of this turn's Assistant bubble!
+                    val existingIdx = currentMsgs.indexOfLast {
+                        turnIndex > 0 && it.turnIndex == turnIndex && it.role == MessageRole.ASSISTANT_VOICE
+                    }
+                    if (existingIdx >= 0) {
+                        val existing = currentMsgs[existingIdx]
+                        currentMsgs[existingIdx] = existing.copy(
+                            backendThinkingText = existing.backendThinkingText + delta,
+                            backendModelTag = modelTag.ifBlank { backModelName },
+                            timestampMs = System.currentTimeMillis()
+                        )
+                    } else {
+                        currentMsgs.add(
+                            ChatMessage(
+                                streamKey = "turn_voice_$turnIndex",
+                                turnIndex = turnIndex,
+                                role = MessageRole.ASSISTANT_VOICE,
+                                text = "",
+                                backendThinkingText = delta,
+                                backendModelTag = modelTag.ifBlank { backModelName },
+                                sessionTimelineMs = timelineMs,
+                                modelTag = frontModelName
+                            )
+                        )
+                    }
+                }
+
+                MessageRole.SYSTEM, MessageRole.WEB_SEARCH -> {
+                    // Attach Calendar / Tool logs directly into the collapsible Thinking Drawer of this turn's Assistant bubble!
+                    val existingIdx = currentMsgs.indexOfLast {
+                        turnIndex > 0 && it.turnIndex == turnIndex && it.role == MessageRole.ASSISTANT_VOICE
+                    }
+                    if (existingIdx >= 0) {
+                        val existing = currentMsgs[existingIdx]
+                        currentMsgs[existingIdx] = existing.copy(
+                            calendarActionLogs = existing.calendarActionLogs + delta,
+                            backendModelTag = existing.backendModelTag.ifBlank { backModelName },
+                            timestampMs = System.currentTimeMillis()
+                        )
+                    } else {
+                        currentMsgs.add(
+                            ChatMessage(
+                                streamKey = "turn_voice_$turnIndex",
+                                turnIndex = turnIndex,
+                                role = MessageRole.ASSISTANT_VOICE,
+                                text = "",
+                                backendModelTag = backModelName,
+                                calendarActionLogs = listOf(delta),
+                                sessionTimelineMs = timelineMs,
+                                modelTag = frontModelName
+                            )
+                        )
+                    }
+                }
             }
 
+            val orderedMsgs = sortMessagesByTurn(currentMsgs)
+
             // Immediate fallback title before AI title finishes generating
-            val firstUserText = currentMsgs.firstOrNull { it.role == MessageRole.USER }?.text?.trim().orEmpty()
+            val firstUserText = orderedMsgs.firstOrNull { it.role == MessageRole.USER }?.text?.trim().orEmpty()
             val updatedTitle = if (!state.currentSession.isTitleAiGenerated &&
                 firstUserText.length >= 4 &&
                 (state.currentSession.title.startsWith("新語音對話") || state.currentSession.title.startsWith("語音對話 ("))
@@ -371,29 +481,51 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
                     updatedAt = System.currentTimeMillis(),
                     frontendModel = state.settings.frontendVoiceModel,
                     backendModel = state.settings.backendBrainModel,
-                    messages = currentMsgs
+                    messages = orderedMsgs
                 )
             )
         }
         persistCurrentSession()
     }
 
-    override fun onSearchCardAdded(result: LinkupSearchResult) {
+    override fun onSearchCardAdded(result: LinkupSearchResult, turnIndex: Int) {
         _uiState.update { state ->
             val currentMsgs = state.currentSession.messages.toMutableList()
-            currentMsgs.add(
-                ChatMessage(
-                    streamKey = "search_${UUID.randomUUID().toString().take(8)}",
-                    role = MessageRole.WEB_SEARCH,
-                    text = "🔍 搜尋關鍵字：「${result.query}」\n\n${result.answer}",
-                    modelTag = "Linkup Search",
-                    sources = result.sources
+            val frontModelName = state.settings.frontendVoiceModel
+            val backModelName = state.settings.backendBrainModel
+            val summaryEntry = "🔍 搜尋關鍵字：「${result.query}」\n${result.answer}"
+
+            val existingIdx = currentMsgs.indexOfLast {
+                turnIndex > 0 && it.turnIndex == turnIndex && it.role == MessageRole.ASSISTANT_VOICE
+            }
+            if (existingIdx >= 0) {
+                val existing = currentMsgs[existingIdx]
+                currentMsgs[existingIdx] = existing.copy(
+                    searchQueriesAndSummaries = existing.searchQueriesAndSummaries + summaryEntry,
+                    sources = (existing.sources + result.sources).distinctBy { it.url },
+                    backendModelTag = existing.backendModelTag.ifBlank { backModelName },
+                    timestampMs = System.currentTimeMillis()
                 )
-            )
+            } else {
+                currentMsgs.add(
+                    ChatMessage(
+                        streamKey = "turn_voice_$turnIndex",
+                        turnIndex = turnIndex,
+                        role = MessageRole.ASSISTANT_VOICE,
+                        text = "",
+                        backendModelTag = backModelName,
+                        searchQueriesAndSummaries = listOf(summaryEntry),
+                        sources = result.sources,
+                        modelTag = frontModelName
+                    )
+                )
+            }
+
+            val orderedMsgs = sortMessagesByTurn(currentMsgs)
             state.copy(
                 currentSession = state.currentSession.copy(
                     updatedAt = System.currentTimeMillis(),
-                    messages = currentMsgs
+                    messages = orderedMsgs
                 )
             )
         }

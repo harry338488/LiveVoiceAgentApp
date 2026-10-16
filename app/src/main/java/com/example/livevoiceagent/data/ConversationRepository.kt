@@ -147,7 +147,27 @@ class ConversationRepository(private val context: Context) {
                 MessageRole.SYSTEM -> "⚙️ **系統紀錄** ($timeStr)"
             }
             sb.appendLine("### $roleHeader")
-            sb.appendLine(msg.text.trim())
+            if (msg.text.isNotBlank()) {
+                sb.appendLine(msg.text.trim())
+            }
+            if (msg.backendThinkingText.isNotBlank()) {
+                sb.appendLine("\n> 🧠 **後端思考與重點詳情 (`${msg.backendModelTag.ifBlank { session.backendModel }}`)：**")
+                msg.backendThinkingText.trim().lines().forEach { line ->
+                    sb.appendLine("> $line")
+                }
+            }
+            if (msg.searchQueriesAndSummaries.isNotEmpty()) {
+                sb.appendLine("\n> 🌐 **Linkup 網路搜尋摘要：**")
+                msg.searchQueriesAndSummaries.forEach { s ->
+                    s.lines().forEach { line -> sb.appendLine("> $line") }
+                }
+            }
+            if (msg.calendarActionLogs.isNotEmpty()) {
+                sb.appendLine("\n> 📅 **行事曆執行紀錄：**")
+                msg.calendarActionLogs.forEach { c ->
+                    c.lines().forEach { line -> sb.appendLine("> $line") }
+                }
+            }
             if (msg.sources.isNotEmpty()) {
                 sb.appendLine("\n**參考來源 (Linkup Sources):**")
                 msg.sources.forEachIndexed { idx, src ->

@@ -416,8 +416,8 @@ private fun ChatMessageItem(
     }
 
     val isUser = message.role == MessageRole.USER
-    val isCollapsibleNote = message.role == MessageRole.BACKEND_BRAIN || message.role == MessageRole.WEB_SEARCH
-    var isExpanded by remember(message.id) { mutableStateOf(false) }
+    val isLegacyCollapsibleNote = message.role == MessageRole.BACKEND_BRAIN || message.role == MessageRole.WEB_SEARCH
+    var isThinkingExpanded by remember(message.id) { mutableStateOf(false) }
 
     val containerColor = when (message.role) {
         MessageRole.USER -> MaterialTheme.colorScheme.primaryContainer
@@ -440,12 +440,10 @@ private fun ChatMessageItem(
         horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
     ) {
         Card(
-            modifier = if (isCollapsibleNote) {
-                Modifier
-                    .fillMaxWidth()
-                    .clickable { isExpanded = !isExpanded }
+            modifier = if (isUser) {
+                Modifier.widthIn(min = 120.dp, max = 330.dp)
             } else {
-                Modifier.widthIn(min = 120.dp, max = 340.dp)
+                Modifier.widthIn(min = 180.dp, max = 365.dp)
             },
             shape = RoundedCornerShape(
                 topStart = 16.dp,
@@ -456,6 +454,7 @@ private fun ChatMessageItem(
             colors = CardDefaults.cardColors(containerColor = containerColor)
         ) {
             Column(modifier = Modifier.padding(12.dp)) {
+                // Header row
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.fillMaxWidth()
@@ -466,15 +465,6 @@ private fun ChatMessageItem(
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier.weight(1f)
                     )
-                    if (isCollapsibleNote) {
-                        Text(
-                            text = if (isExpanded) "點擊收合 ▲" else "點擊展開詳情 ▼",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                    }
                     Text(
                         text = timeStr,
                         style = MaterialTheme.typography.labelSmall,
@@ -486,43 +476,184 @@ private fun ChatMessageItem(
                         contentDescription = "複製",
                         modifier = Modifier
                             .size(16.dp)
-                            .clickable { onCopyText(message.text) }
+                            .clickable {
+                                val fullCopy = buildString {
+                                    if (message.text.isNotBlank()) appendLine(message.text)
+                                    if (message.backendThinkingText.isNotBlank()) {
+                                        appendLine("\n--- 後端重點詳情 (${message.backendModelTag}) ---")
+                                        appendLine(message.backendThinkingText)
+                                    }
+                                }.trim()
+                                onCopyText(fullCopy)
+                            }
                     )
                 }
 
-                Spacer(modifier = Modifier.height(6.dp))
-
-                Text(
-                    text = message.text,
-                    style = MaterialTheme.typography.bodyMedium,
-                    maxLines = if (isCollapsibleNote && !isExpanded) 3 else Int.MAX_VALUE,
-                    overflow = TextOverflow.Ellipsis
-                )
-
-                if (message.sources.isNotEmpty() && (!isCollapsibleNote || isExpanded)) {
+                // Embedded "Thinking Mode" collapsible drawer (for Backend Brain + Linkup Search + Calendar)
+                if (message.hasThinkingDetails) {
                     Spacer(modifier = Modifier.height(8.dp))
-                    HorizontalDivider()
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = "參考網頁來源 (點擊開啟):",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold
-                    )
-                    message.sources.take(5).forEachIndexed { idx, src ->
-                        Text(
-                            text = "${idx + 1}. ${src.title} (${src.url})",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.primary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 2.dp)
-                                .clickable {
-                                    if (src.url.isNotBlank()) onOpenUrl(src.url)
+
+                    val summaryBadges = buildList {
+                        if (message.backendThinkingText.isNotBlank()) {
+                            add("🧠 ${message.backendModelTag.ifBlank { "後端重點" }}")
+                        }
+                        if (message.searchQueriesAndSummaries.isNotEmpty() || message.sources.isNotEmpty()) {
+                            val count = maxOf(message.searchQueriesAndSummaries.size, 1)
+                            add("🌐 Linkup 搜尋 ($count)")
+                        }
+                        if (message.calendarActionLogs.isNotEmpty()) {
+                            add("📅 行事曆 (${message.calendarActionLogs.size})")
+                        }
+                    }.joinToString(" · ")
+
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.68f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { isThinkingExpanded = !isThinkingExpanded }
+                    ) {
+                        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    text = "💭 思考與背景重點：$summaryBadges",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = if (isThinkingExpanded) "收合 ▲" else "展開詳情 ▼",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+
+                            if (isThinkingExpanded) {
+                                Spacer(modifier = Modifier.height(8.dp))
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
+
+                                // 1. Linkup Search Queries & Summaries
+                                if (message.searchQueriesAndSummaries.isNotEmpty()) {
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Text(
+                                        text = "🌐 Linkup 網路檢索摘要",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.secondary
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    message.searchQueriesAndSummaries.forEach { searchItem ->
+                                        Text(
+                                            text = searchItem,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            modifier = Modifier.padding(bottom = 6.dp)
+                                        )
+                                    }
                                 }
-                        )
+
+                                // 2. Web Sources
+                                if (message.sources.isNotEmpty()) {
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = "🔗 參考來源連結 (點擊開啟):",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    message.sources.take(6).forEachIndexed { idx, src ->
+                                        Text(
+                                            text = "${idx + 1}. ${src.title} (${src.url})",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(vertical = 2.dp)
+                                                .clickable {
+                                                    if (src.url.isNotBlank()) onOpenUrl(src.url)
+                                                }
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                }
+
+                                // 3. Calendar Actions
+                                if (message.calendarActionLogs.isNotEmpty()) {
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = "📅 行事曆執行紀錄",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.tertiary
+                                    )
+                                    message.calendarActionLogs.forEach { calLog ->
+                                        Text(
+                                            text = calLog,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            modifier = Modifier.padding(vertical = 3.dp)
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                }
+
+                                // 4. Backend Brain Detailed Notes
+                                if (message.backendThinkingText.isNotBlank()) {
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Text(
+                                            text = "🧠 後端模型重點筆記 (${message.backendModelTag.ifBlank { "Backend LLM" }})",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        Text(
+                                            text = "複製筆記",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.clickable {
+                                                onCopyText(message.backendThinkingText)
+                                            }
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = message.backendThinkingText.trim(),
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+                            }
+                        }
                     }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Main Unbroken Spoken Transcript
+                if (message.text.isNotBlank()) {
+                    Text(
+                        text = message.text,
+                        style = MaterialTheme.typography.bodyMedium,
+                        maxLines = if (isLegacyCollapsibleNote && !isThinkingExpanded) 3 else Int.MAX_VALUE,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                } else if (message.hasThinkingDetails) {
+                    Text(
+                        text = "（後端處理中，語音回覆即將開始...）",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f)
+                    )
                 }
             }
         }
@@ -544,7 +675,10 @@ private fun HistorySessionsTab(
         } else {
             uiState.savedSessions.filter { s ->
                 s.title.lowercase().contains(query) ||
-                        s.messages.any { m -> m.text.lowercase().contains(query) }
+                        s.messages.any { m ->
+                            m.text.lowercase().contains(query) ||
+                                    m.backendThinkingText.lowercase().contains(query)
+                        }
             }
         }
     }

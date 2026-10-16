@@ -27,9 +27,10 @@ interface LiveSessionListener {
         delta: String,
         timelineMs: Long,
         modelTag: String,
-        streamKey: String
+        streamKey: String,
+        turnIndex: Int
     )
-    fun onSearchCardAdded(result: LinkupSearchResult)
+    fun onSearchCardAdded(result: LinkupSearchResult, turnIndex: Int)
     fun onTurnCompleted()
     fun onMicLevelChanged(level: Float)
     fun onVoiceUsageUpdated(seconds: Int)
@@ -62,16 +63,45 @@ class LiveSessionManager(
     @Volatile
     private var isClosing: Boolean = false
 
-    // Independent stream trackers so User speech, Assistant Voice, Backend Brain, and Linkup Search NEVER split or interrupt each other!
+    // Turn-based state machine: guarantees 1 unbroken User bubble + 1 unbroken Assistant Voice bubble per turn,
+    // with Backend Brain & Linkup Search cards neatly attached below the voice bubble of that turn.
     private var sessionEpochId: String = UUID.randomUUID().toString().take(6)
-    private var userTurnCounter: Int = 1
-    private var voiceTurnCounter: Int = 1
-    private var backendTurnCounter: Int = 1
+    @Volatile
+    private var currentTurnIndex: Int = 1
+    @Volatile
+    private var userCharsInTurn: Int = 0
+    @Volatile
+    private var voiceCharsInTurn: Int = 0
+    @Volatile
+    private var voiceCharsAfterDelegation: Int = 0
+    @Volatile
+    private var isDelegationActive: Boolean = false
+    @Volatile
+    private var isToolCallRunning: Boolean = false
+    @Volatile
+    private var delegationCompletedInTurn: Boolean = false
+    @Volatile
+    private var needsVoiceParagraphBreak: Boolean = false
+    @Volatile
+    private var lastUserDeltaWallMs: Long = 0L
+    @Volatile
+    private var lastVoiceDeltaWallMs: Long = 0L
+    @Volatile
+    private var lastDelegationDoneWallMs: Long = 0L
+    @Volatile
+    private var lastBackendItemId: String = ""
 
-    private var lastUserTranscriptEndMs: Long = -10_000L
-    private var lastAssistantTranscriptEndMs: Long = -10_000L
-    private var assistantCharsInCurrentTurn: Int = 0
-    private var userCharsInCurrentTurn: Int = 0
+    private fun advanceToNextTurn() {
+        currentTurnIndex++
+        userCharsInTurn = 0
+        voiceCharsInTurn = 0
+        voiceCharsAfterDelegation = 0
+        isDelegationActive = false
+        isToolCallRunning = false
+        delegationCompletedInTurn = false
+        needsVoiceParagraphBreak = false
+        lastBackendItemId = ""
+    }
 
     fun connect(
         settings: AppSettings,
@@ -85,13 +115,19 @@ class LiveSessionManager(
         isClosing = false
 
         sessionEpochId = UUID.randomUUID().toString().take(6)
-        userTurnCounter = 1
-        voiceTurnCounter = 1
-        backendTurnCounter = 1
-        lastUserTranscriptEndMs = -10_000L
-        lastAssistantTranscriptEndMs = -10_000L
-        assistantCharsInCurrentTurn = 0
-        userCharsInCurrentTurn = 0
+        val maxPriorTurn = priorMessages.maxOfOrNull { it.turnIndex } ?: 0
+        currentTurnIndex = maxOf(maxPriorTurn, priorMessages.size) + 1
+        userCharsInTurn = 0
+        voiceCharsInTurn = 0
+        voiceCharsAfterDelegation = 0
+        isDelegationActive = false
+        isToolCallRunning = false
+        delegationCompletedInTurn = false
+        needsVoiceParagraphBreak = false
+        lastUserDeltaWallMs = 0L
+        lastVoiceDeltaWallMs = 0L
+        lastDelegationDoneWallMs = 0L
+        lastBackendItemId = ""
 
         val frontModel = settings.frontendVoiceModel.trim().ifBlank { "gpt-live-1" }
         activeProtocol = when {
@@ -275,15 +311,21 @@ class LiveSessionManager(
             .filter { it.role == MessageRole.USER || it.role == MessageRole.ASSISTANT_VOICE || it.role == MessageRole.BACKEND_BRAIN }
             .takeLast(64)
             .forEach { msg ->
-                val text = msg.text.trim()
-                if (text.isNotEmpty()) {
+                val combinedText = buildString {
+                    if (msg.text.isNotBlank()) append(msg.text.trim())
+                    if (msg.backendThinkingText.isNotBlank()) {
+                        if (isNotEmpty()) append("\n[後端重點筆記]: ")
+                        append(msg.backendThinkingText.trim())
+                    }
+                }.trim()
+                if (combinedText.isNotEmpty()) {
                     val isUser = msg.role == MessageRole.USER
                     arr.put(JSONObject().apply {
                         put("type", "message")
                         put("role", if (isUser) "user" else "assistant")
                         put("content", JSONArray().put(JSONObject().apply {
                             put("type", if (isUser) "input_text" else "output_text")
-                            put("text", text.take(1500))
+                            put("text", combinedText.take(1600))
                         }))
                     })
                 }
@@ -323,25 +365,45 @@ class LiveSessionManager(
             "session.input_transcript.delta" -> {
                 val delta = event.optString("delta", "")
                 val startMs = event.optLong("start_ms", 0L)
-                val endMs = event.optLong("end_ms", startMs)
                 if (delta.isNotEmpty()) {
-                    val gapMs = startMs - lastUserTranscriptEndMs
-                    // Start a new user bubble ONLY if the user paused for > 5.5s, or if the AI already gave a full reply (> 25 chars) and user paused > 2.2s
-                    if (lastUserTranscriptEndMs >= 0L && (gapMs > 5500L || (assistantCharsInCurrentTurn > 25 && gapMs > 2200L))) {
-                        userTurnCounter++
-                        userCharsInCurrentTurn = 0
-                        assistantCharsInCurrentTurn = 0
-                    }
-                    lastUserTranscriptEndMs = maxOf(lastUserTranscriptEndMs, endMs)
-                    userCharsInCurrentTurn += delta.length
+                    val now = System.currentTimeMillis()
+                    val silenceSinceVoice = if (lastVoiceDeltaWallMs > 0L) now - lastVoiceDeltaWallMs else 999_999L
+                    val silenceSinceUser = if (lastUserDeltaWallMs > 0L) now - lastUserDeltaWallMs else 999_999L
+                    val silenceSinceDelegation = if (lastDelegationDoneWallMs > 0L) now - lastDelegationDoneWallMs else 999_999L
 
-                    val streamKey = "user_${sessionEpochId}_$userTurnCounter"
+                    // Advance to a new turn ONLY if the previous turn has actually been answered by the AI
+                    // and no delegation/tool call is currently running.
+                    val previousTurnFinishedWithDelegation =
+                        delegationCompletedInTurn && !isDelegationActive && !isToolCallRunning &&
+                                (voiceCharsAfterDelegation >= 6 || silenceSinceDelegation > 3500L) &&
+                                silenceSinceVoice > 1100L && silenceSinceUser > 1000L
+
+                    val previousTurnFinishedDirectVoice =
+                        !delegationCompletedInTurn && !isDelegationActive && !isToolCallRunning &&
+                                voiceCharsInTurn >= 8 && silenceSinceVoice > 1200L && silenceSinceUser > 1000L
+
+                    if (previousTurnFinishedWithDelegation || previousTurnFinishedDirectVoice) {
+                        advanceToNextTurn()
+                    }
+
+                    val formattedDelta = if (userCharsInTurn > 0 && silenceSinceUser > 1400L && !delta.startsWith(" ")) {
+                        " $delta"
+                    } else {
+                        delta
+                    }
+
+                    lastUserDeltaWallMs = now
+                    userCharsInTurn += delta.length
+
+                    val turnIdx = currentTurnIndex
+                    val streamKey = "turn_${sessionEpochId}_${turnIdx}_user"
                     listener.onTranscriptDelta(
                         role = MessageRole.USER,
-                        delta = delta,
+                        delta = formattedDelta,
                         timelineMs = startMs,
                         modelTag = "User",
-                        streamKey = streamKey
+                        streamKey = streamKey,
+                        turnIndex = turnIdx
                     )
                 }
             }
@@ -349,24 +411,32 @@ class LiveSessionManager(
             "session.output_transcript.delta" -> {
                 val delta = event.optString("delta", "")
                 val startMs = event.optLong("start_ms", 0L)
-                val endMs = event.optLong("end_ms", startMs)
                 if (delta.isNotEmpty()) {
-                    val gapMs = startMs - lastAssistantTranscriptEndMs
-                    // Start a new assistant voice bubble ONLY if the assistant paused for > 5s, or if user spoke a new turn (> 6 chars) and assistant paused > 1.8s
-                    if (lastAssistantTranscriptEndMs >= 0L && (gapMs > 5000L || (userCharsInCurrentTurn > 6 && gapMs > 1800L))) {
-                        voiceTurnCounter++
-                        userCharsInCurrentTurn = 0
+                    // NEVER split the Assistant Voice bubble within a turn!
+                    // Both pre-delegation filler ("好的，我幫你查一下...") and post-delegation answer ("查到了！結果是...")
+                    // stay inside the exact same Assistant Voice bubble for this turn, separated by a clean paragraph break.
+                    val formattedDelta = if (needsVoiceParagraphBreak && voiceCharsInTurn > 0) {
+                        needsVoiceParagraphBreak = false
+                        "\n\n$delta"
+                    } else {
+                        delta
                     }
-                    lastAssistantTranscriptEndMs = maxOf(lastAssistantTranscriptEndMs, endMs)
-                    assistantCharsInCurrentTurn += delta.length
 
-                    val streamKey = "voice_${sessionEpochId}_$voiceTurnCounter"
+                    lastVoiceDeltaWallMs = System.currentTimeMillis()
+                    voiceCharsInTurn += delta.length
+                    if (delegationCompletedInTurn && !isDelegationActive) {
+                        voiceCharsAfterDelegation += delta.length
+                    }
+
+                    val turnIdx = currentTurnIndex
+                    val streamKey = "turn_${sessionEpochId}_${turnIdx}_voice"
                     listener.onTranscriptDelta(
                         role = MessageRole.ASSISTANT_VOICE,
-                        delta = delta,
+                        delta = formattedDelta,
                         timelineMs = startMs,
                         modelTag = settings.frontendVoiceModel,
-                        streamKey = streamKey
+                        streamKey = streamKey,
+                        turnIndex = turnIdx
                     )
                     listener.onTurnCompleted()
                 }
@@ -377,6 +447,12 @@ class LiveSessionManager(
                 val delegationId = delegationObj?.optString("id", "").orEmpty()
                 val target = delegationObj?.optString("target", "responses").orEmpty()
 
+                isDelegationActive = true
+                if (voiceCharsInTurn > 0) {
+                    needsVoiceParagraphBreak = true
+                }
+
+                val turnIdx = currentTurnIndex
                 listener.onConnectionStateChanged(
                     ConnectionState.DELEGATING,
                     "後端 ${settings.backendBrainModel} 正在推理/搜尋/處理任務..."
@@ -389,7 +465,7 @@ class LiveSessionManager(
                             settings = settings,
                             conversationHistory = snapshot,
                             onSearchExecuted = { searchResult ->
-                                listener.onSearchCardAdded(searchResult)
+                                listener.onSearchCardAdded(searchResult, turnIdx)
                             },
                             onCalendarActionLogged = { calNote ->
                                 listener.onTranscriptDelta(
@@ -397,7 +473,8 @@ class LiveSessionManager(
                                     delta = calNote,
                                     timelineMs = System.currentTimeMillis(),
                                     modelTag = "Calendar",
-                                    streamKey = "cal_${UUID.randomUUID().toString().take(8)}"
+                                    streamKey = "turn_${sessionEpochId}_${turnIdx}_cal_${UUID.randomUUID().toString().take(6)}",
+                                    turnIndex = turnIdx
                                 )
                             }
                         )
@@ -408,7 +485,8 @@ class LiveSessionManager(
                                     delta = brainResp.detailedNotes,
                                     timelineMs = System.currentTimeMillis(),
                                     modelTag = settings.backendBrainModel,
-                                    streamKey = "backend_$delegationId"
+                                    streamKey = "turn_${sessionEpochId}_${turnIdx}_backend",
+                                    turnIndex = turnIdx
                                 )
                             }
                             val commentaryEvent = JSONObject().apply {
@@ -418,12 +496,21 @@ class LiveSessionManager(
                                 put("content", brainResp.spokenSummary.take(1200))
                             }
                             webSocket.send(commentaryEvent.toString())
+                            isDelegationActive = false
+                            delegationCompletedInTurn = true
+                            lastDelegationDoneWallMs = System.currentTimeMillis()
+                            if (voiceCharsInTurn > 0) {
+                                needsVoiceParagraphBreak = true
+                            }
                             listener.onTurnCompleted()
                             listener.onConnectionStateChanged(
                                 ConnectionState.LIVE,
                                 "通話中：${settings.frontendVoiceModel} ⇄ ${settings.backendBrainModel}"
                             )
                         }.onFailure { err ->
+                            isDelegationActive = false
+                            delegationCompletedInTurn = true
+                            lastDelegationDoneWallMs = System.currentTimeMillis()
                             listener.onError("後端委派執行失敗: ${err.message}")
                             listener.onConnectionStateChanged(
                                 ConnectionState.LIVE,
@@ -435,25 +522,34 @@ class LiveSessionManager(
             }
 
             "response.event" -> {
-                val delegationId = event.optString("delegation_id", "").ifBlank { "resp_$backendTurnCounter" }
+                val delegationId = event.optString("delegation_id", "").ifBlank { "resp_$currentTurnIndex" }
                 val inner = event.optJSONObject("event") ?: return
                 val innerType = inner.optString("type", "")
+                val turnIdx = currentTurnIndex
+
                 when (innerType) {
                     "response.created" -> {
-                        backendTurnCounter++
+                        isDelegationActive = true
+                        if (voiceCharsInTurn > 0) {
+                            needsVoiceParagraphBreak = true
+                        }
                     }
                     "response.output_text.delta" -> {
                         val delta = inner.optString("delta", "")
                         val itemId = inner.optString("item_id", delegationId)
                         if (delta.isNotEmpty()) {
-                            // Uses its own dedicated streamKey ("backend_<delegationId>_<itemId>") so it NEVER collides with voice or user text!
-                            val backendStreamKey = "backend_${delegationId}_$itemId"
+                            isDelegationActive = true
+                            val prefix = if (lastBackendItemId.isNotEmpty() && lastBackendItemId != itemId) "\n\n" else ""
+                            lastBackendItemId = itemId
+
+                            val backendStreamKey = "turn_${sessionEpochId}_${turnIdx}_backend"
                             listener.onTranscriptDelta(
                                 role = MessageRole.BACKEND_BRAIN,
-                                delta = delta,
+                                delta = prefix + delta,
                                 timelineMs = System.currentTimeMillis(),
                                 modelTag = settings.backendBrainModel,
-                                streamKey = backendStreamKey
+                                streamKey = backendStreamKey,
+                                turnIndex = turnIdx
                             )
                         }
                     }
@@ -464,16 +560,25 @@ class LiveSessionManager(
                             val fnName = item.optString("name", "")
                             val argsStr = item.optString("arguments", "{}")
                             if (callId.isNotBlank()) {
-                                handleResponsesFunctionToolCall(webSocket, callId, fnName, argsStr, settings)
+                                isToolCallRunning = true
+                                handleResponsesFunctionToolCall(webSocket, callId, fnName, argsStr, settings, turnIdx)
                             }
                         }
                     }
                     "response.completed" -> {
-                        listener.onTurnCompleted()
-                        listener.onConnectionStateChanged(
-                            ConnectionState.LIVE,
-                            "通話中：${settings.frontendVoiceModel} ⇄ ${settings.backendBrainModel}"
-                        )
+                        if (!isToolCallRunning) {
+                            isDelegationActive = false
+                            delegationCompletedInTurn = true
+                            lastDelegationDoneWallMs = System.currentTimeMillis()
+                            if (voiceCharsInTurn > 0) {
+                                needsVoiceParagraphBreak = true
+                            }
+                            listener.onTurnCompleted()
+                            listener.onConnectionStateChanged(
+                                ConnectionState.LIVE,
+                                "通話中：${settings.frontendVoiceModel} ⇄ ${settings.backendBrainModel}"
+                            )
+                        }
                     }
                 }
             }
@@ -502,76 +607,86 @@ class LiveSessionManager(
         callId: String,
         fnName: String,
         argsStr: String,
-        settings: AppSettings
+        settings: AppSettings,
+        turnIdx: Int
     ) {
         scope.launch {
-            val argsJson = runCatching { JSONObject(argsStr) }.getOrDefault(JSONObject())
-            val toolOutputText: String
+            try {
+                val argsJson = runCatching { JSONObject(argsStr) }.getOrDefault(JSONObject())
+                val toolOutputText: String
 
-            when {
-                fnName == "linkup_web_search" -> {
-                    val query = argsJson.optString("query", "")
-                    val depth = argsJson.optString("depth", settings.linkupSearchDepth)
+                when {
+                    fnName == "linkup_web_search" -> {
+                        val query = argsJson.optString("query", "")
+                        val depth = argsJson.optString("depth", settings.linkupSearchDepth)
 
-                    listener.onConnectionStateChanged(
-                        ConnectionState.DELEGATING,
-                        "正在透過 Linkup 搜尋: $query ..."
-                    )
-
-                    val searchResult = linkupClient.search(
-                        apiKey = settings.linkupApiKey,
-                        query = query,
-                        depth = depth
-                    ).getOrElse { err ->
-                        LinkupSearchResult(
-                            query = query,
-                            answer = "Linkup 搜尋錯誤: ${err.message}",
-                            sources = emptyList(),
-                            rawFormattedForLlm = "Linkup 搜尋失敗: ${err.message}"
+                        listener.onConnectionStateChanged(
+                            ConnectionState.DELEGATING,
+                            "正在透過 Linkup 搜尋: $query ..."
                         )
+
+                        val searchResult = linkupClient.search(
+                            apiKey = settings.linkupApiKey,
+                            query = query,
+                            depth = depth
+                        ).getOrElse { err ->
+                            LinkupSearchResult(
+                                query = query,
+                                answer = "Linkup 搜尋錯誤: ${err.message}",
+                                sources = emptyList(),
+                                rawFormattedForLlm = "Linkup 搜尋失敗: ${err.message}"
+                            )
+                        }
+
+                        listener.onSearchCardAdded(searchResult, turnIdx)
+                        toolOutputText = searchResult.rawFormattedForLlm
                     }
 
-                    listener.onSearchCardAdded(searchResult)
-                    toolOutputText = searchResult.rawFormattedForLlm
+                    CalendarToolManager.CALENDAR_TOOL_NAMES.contains(fnName) -> {
+                        listener.onConnectionStateChanged(
+                            ConnectionState.DELEGATING,
+                            "正在執行手機行事曆操作 ($fnName)..."
+                        )
+                        val calJson = calendarToolManager.executeCalendarTool(fnName, argsJson)
+                        listener.onTranscriptDelta(
+                            role = MessageRole.SYSTEM,
+                            delta = "📅 行事曆操作 (`$fnName`):\n$calJson",
+                            timelineMs = System.currentTimeMillis(),
+                            modelTag = "Android Calendar",
+                            streamKey = "turn_${sessionEpochId}_${turnIdx}_cal_$callId",
+                            turnIndex = turnIdx
+                        )
+                        toolOutputText = calJson
+                    }
+
+                    else -> {
+                        toolOutputText = "{\"status\":\"error\",\"message\":\"Unknown tool: $fnName\"}"
+                    }
                 }
 
-                CalendarToolManager.CALENDAR_TOOL_NAMES.contains(fnName) -> {
-                    listener.onConnectionStateChanged(
-                        ConnectionState.DELEGATING,
-                        "正在執行手機行事曆操作 ($fnName)..."
-                    )
-                    val calJson = calendarToolManager.executeCalendarTool(fnName, argsJson)
-                    listener.onTranscriptDelta(
-                        role = MessageRole.SYSTEM,
-                        delta = "📅 行事曆操作 (`$fnName`):\n$calJson",
-                        timelineMs = System.currentTimeMillis(),
-                        modelTag = "Android Calendar",
-                        streamKey = "cal_$callId"
-                    )
-                    toolOutputText = calJson
+                val itemCreateEvent = JSONObject().apply {
+                    put("type", "response.item.create")
+                    put("event_id", "tool_res_${UUID.randomUUID().toString().take(8)}")
+                    put("item", JSONObject().apply {
+                        put("type", "function_call_output")
+                        put("call_id", callId)
+                        put("output", toolOutputText)
+                    })
                 }
+                webSocket.send(itemCreateEvent.toString())
 
-                else -> {
-                    toolOutputText = "{\"status\":\"error\",\"message\":\"Unknown tool: $fnName\"}"
+                isToolCallRunning = false
+                isDelegationActive = true
+
+                val continueEvent = JSONObject().apply {
+                    put("type", "response.create")
+                    put("event_id", "continue_${UUID.randomUUID().toString().take(8)}")
                 }
+                webSocket.send(continueEvent.toString())
+            } catch (e: Exception) {
+                isToolCallRunning = false
+                isDelegationActive = false
             }
-
-            val itemCreateEvent = JSONObject().apply {
-                put("type", "response.item.create")
-                put("event_id", "tool_res_${UUID.randomUUID().toString().take(8)}")
-                put("item", JSONObject().apply {
-                    put("type", "function_call_output")
-                    put("call_id", callId)
-                    put("output", toolOutputText)
-                })
-            }
-            webSocket.send(itemCreateEvent.toString())
-
-            val continueEvent = JSONObject().apply {
-                put("type", "response.create")
-                put("event_id", "continue_${UUID.randomUUID().toString().take(8)}")
-            }
-            webSocket.send(continueEvent.toString())
         }
     }
 
@@ -646,14 +761,23 @@ class LiveSessionManager(
 
             "conversation.item.input_audio_transcription.completed" -> {
                 val transcript = event.optString("transcript", "")
-                val itemId = event.optString("item_id", "${userTurnCounter++}")
                 if (transcript.isNotBlank()) {
+                    val now = System.currentTimeMillis()
+                    if (!isDelegationActive && !isToolCallRunning && voiceCharsInTurn >= 6) {
+                        advanceToNextTurn()
+                    }
+                    val formatted = if (userCharsInTurn > 0) " $transcript" else transcript
+                    userCharsInTurn += transcript.length
+                    lastUserDeltaWallMs = now
+
+                    val turnIdx = currentTurnIndex
                     listener.onTranscriptDelta(
                         role = MessageRole.USER,
-                        delta = transcript,
-                        timelineMs = System.currentTimeMillis(),
+                        delta = formatted,
+                        timelineMs = now,
                         modelTag = "User",
-                        streamKey = "rt_user_$itemId"
+                        streamKey = "turn_${sessionEpochId}_${turnIdx}_user",
+                        turnIndex = turnIdx
                     )
                 }
             }
@@ -667,21 +791,31 @@ class LiveSessionManager(
 
             "response.audio_transcript.delta", "response.output_audio_transcript.delta" -> {
                 val delta = event.optString("delta", "")
-                val itemId = event.optString("item_id", event.optString("response_id", "$voiceTurnCounter"))
                 if (delta.isNotEmpty()) {
+                    val formatted = if (needsVoiceParagraphBreak && voiceCharsInTurn > 0) {
+                        needsVoiceParagraphBreak = false
+                        "\n\n$delta"
+                    } else {
+                        delta
+                    }
+                    voiceCharsInTurn += delta.length
+                    lastVoiceDeltaWallMs = System.currentTimeMillis()
+                    val turnIdx = currentTurnIndex
                     listener.onTranscriptDelta(
                         role = MessageRole.ASSISTANT_VOICE,
-                        delta = delta,
+                        delta = formatted,
                         timelineMs = System.currentTimeMillis(),
                         modelTag = settings.frontendVoiceModel,
-                        streamKey = "rt_voice_$itemId"
+                        streamKey = "turn_${sessionEpochId}_${turnIdx}_voice",
+                        turnIndex = turnIdx
                     )
                 }
             }
 
             "response.done" -> {
-                voiceTurnCounter++
-                listener.onTurnCompleted()
+                if (!isToolCallRunning && !isDelegationActive) {
+                    listener.onTurnCompleted()
+                }
             }
 
             "response.function_call_arguments.done" -> {
@@ -689,12 +823,19 @@ class LiveSessionManager(
                 val fnName = event.optString("name", "")
                 val argsStr = event.optString("arguments", "{}")
                 if (callId.isNotBlank()) {
+                    isToolCallRunning = true
+                    isDelegationActive = true
+                    if (voiceCharsInTurn > 0) {
+                        needsVoiceParagraphBreak = true
+                    }
+                    val turnIdx = currentTurnIndex
                     handleRealtimeFunctionCall(
                         webSocket = webSocket,
                         callId = callId,
                         fnName = fnName,
                         argsStr = argsStr,
                         settings = settings,
+                        turnIdx = turnIdx,
                         conversationSnapshotProvider = conversationSnapshotProvider
                     )
                 }
@@ -713,98 +854,115 @@ class LiveSessionManager(
         fnName: String,
         argsStr: String,
         settings: AppSettings,
+        turnIdx: Int,
         conversationSnapshotProvider: () -> List<ChatMessage>
     ) {
         scope.launch {
-            val argsJson = runCatching { JSONObject(argsStr) }.getOrDefault(JSONObject())
-            val outputText: String
+            try {
+                val argsJson = runCatching { JSONObject(argsStr) }.getOrDefault(JSONObject())
+                val outputText: String
 
-            when {
-                fnName == "linkup_web_search" -> {
-                    val query = argsJson.optString("query", "")
-                    val depth = argsJson.optString("depth", settings.linkupSearchDepth)
-                    listener.onConnectionStateChanged(ConnectionState.DELEGATING, "Linkup 搜尋中: $query")
+                when {
+                    fnName == "linkup_web_search" -> {
+                        val query = argsJson.optString("query", "")
+                        val depth = argsJson.optString("depth", settings.linkupSearchDepth)
+                        listener.onConnectionStateChanged(ConnectionState.DELEGATING, "Linkup 搜尋中: $query")
 
-                    val res = linkupClient.search(settings.linkupApiKey, query, depth).getOrElse { err ->
-                        LinkupSearchResult(query, "搜尋失敗: ${err.message}", emptyList(), "搜尋失敗: ${err.message}")
-                    }
-                    listener.onSearchCardAdded(res)
-                    outputText = res.rawFormattedForLlm
-                }
-
-                CalendarToolManager.CALENDAR_TOOL_NAMES.contains(fnName) -> {
-                    listener.onConnectionStateChanged(ConnectionState.DELEGATING, "正在執行行事曆操作 ($fnName)...")
-                    val calJson = calendarToolManager.executeCalendarTool(fnName, argsJson)
-                    listener.onTranscriptDelta(
-                        role = MessageRole.SYSTEM,
-                        delta = "📅 行事曆操作 (`$fnName`):\n$calJson",
-                        timelineMs = System.currentTimeMillis(),
-                        modelTag = "Android Calendar",
-                        streamKey = "cal_$callId"
-                    )
-                    outputText = calJson
-                }
-
-                else -> {
-                    val taskQuery = argsJson.optString("task_query", "")
-                    listener.onConnectionStateChanged(
-                        ConnectionState.DELEGATING,
-                        "委派後端 ${settings.backendBrainModel} 處理中..."
-                    )
-                    val res = backendLlmClient.runDelegatedTask(
-                        settings = settings,
-                        conversationHistory = conversationSnapshotProvider(),
-                        taskHint = taskQuery,
-                        onSearchExecuted = { searchResult ->
-                            listener.onSearchCardAdded(searchResult)
-                        },
-                        onCalendarActionLogged = { calNote ->
-                            listener.onTranscriptDelta(
-                                role = MessageRole.SYSTEM,
-                                delta = calNote,
-                                timelineMs = System.currentTimeMillis(),
-                                modelTag = "Calendar",
-                                streamKey = "cal_${UUID.randomUUID().toString().take(8)}"
-                            )
+                        val res = linkupClient.search(settings.linkupApiKey, query, depth).getOrElse { err ->
+                            LinkupSearchResult(query, "搜尋失敗: ${err.message}", emptyList(), "搜尋失敗: ${err.message}")
                         }
-                    )
-                    outputText = res.fold(
-                        onSuccess = { brainResp ->
-                            if (brainResp.detailedNotes.isNotBlank()) {
+                        listener.onSearchCardAdded(res, turnIdx)
+                        outputText = res.rawFormattedForLlm
+                    }
+
+                    CalendarToolManager.CALENDAR_TOOL_NAMES.contains(fnName) -> {
+                        listener.onConnectionStateChanged(ConnectionState.DELEGATING, "正在執行行事曆操作 ($fnName)...")
+                        val calJson = calendarToolManager.executeCalendarTool(fnName, argsJson)
+                        listener.onTranscriptDelta(
+                            role = MessageRole.SYSTEM,
+                            delta = "📅 行事曆操作 (`$fnName`):\n$calJson",
+                            timelineMs = System.currentTimeMillis(),
+                            modelTag = "Android Calendar",
+                            streamKey = "turn_${sessionEpochId}_${turnIdx}_cal_$callId",
+                            turnIndex = turnIdx
+                        )
+                        outputText = calJson
+                    }
+
+                    else -> {
+                        val taskQuery = argsJson.optString("task_query", "")
+                        listener.onConnectionStateChanged(
+                            ConnectionState.DELEGATING,
+                            "委派後端 ${settings.backendBrainModel} 處理中..."
+                        )
+                        val res = backendLlmClient.runDelegatedTask(
+                            settings = settings,
+                            conversationHistory = conversationSnapshotProvider(),
+                            taskHint = taskQuery,
+                            onSearchExecuted = { searchResult ->
+                                listener.onSearchCardAdded(searchResult, turnIdx)
+                            },
+                            onCalendarActionLogged = { calNote ->
                                 listener.onTranscriptDelta(
-                                    role = MessageRole.BACKEND_BRAIN,
-                                    delta = brainResp.detailedNotes,
+                                    role = MessageRole.SYSTEM,
+                                    delta = calNote,
                                     timelineMs = System.currentTimeMillis(),
-                                    modelTag = settings.backendBrainModel,
-                                    streamKey = "backend_$callId"
+                                    modelTag = "Calendar",
+                                    streamKey = "turn_${sessionEpochId}_${turnIdx}_cal_${UUID.randomUUID().toString().take(6)}",
+                                    turnIndex = turnIdx
                                 )
                             }
-                            brainResp.spokenSummary
-                        },
-                        onFailure = { err -> "後端處理錯誤: ${err.message}" }
-                    )
+                        )
+                        outputText = res.fold(
+                            onSuccess = { brainResp ->
+                                if (brainResp.detailedNotes.isNotBlank()) {
+                                    listener.onTranscriptDelta(
+                                        role = MessageRole.BACKEND_BRAIN,
+                                        delta = brainResp.detailedNotes,
+                                        timelineMs = System.currentTimeMillis(),
+                                        modelTag = settings.backendBrainModel,
+                                        streamKey = "turn_${sessionEpochId}_${turnIdx}_backend",
+                                        turnIndex = turnIdx
+                                    )
+                                }
+                                brainResp.spokenSummary
+                            },
+                            onFailure = { err -> "後端處理錯誤: ${err.message}" }
+                        )
+                    }
                 }
-            }
 
-            val itemCreate = JSONObject().apply {
-                put("type", "conversation.item.create")
-                put("item", JSONObject().apply {
-                    put("type", "function_call_output")
-                    put("call_id", callId)
-                    put("output", outputText)
-                })
-            }
-            webSocket.send(itemCreate.toString())
+                val itemCreate = JSONObject().apply {
+                    put("type", "conversation.item.create")
+                    put("item", JSONObject().apply {
+                        put("type", "function_call_output")
+                        put("call_id", callId)
+                        put("output", outputText)
+                    })
+                }
+                webSocket.send(itemCreate.toString())
 
-            val respCreate = JSONObject().apply {
-                put("type", "response.create")
-            }
-            webSocket.send(respCreate.toString())
+                isToolCallRunning = false
+                isDelegationActive = false
+                delegationCompletedInTurn = true
+                lastDelegationDoneWallMs = System.currentTimeMillis()
+                if (voiceCharsInTurn > 0) {
+                    needsVoiceParagraphBreak = true
+                }
 
-            listener.onConnectionStateChanged(
-                ConnectionState.LIVE,
-                "通話中：${settings.frontendVoiceModel} ⇄ ${settings.backendBrainModel}"
-            )
+                val respCreate = JSONObject().apply {
+                    put("type", "response.create")
+                }
+                webSocket.send(respCreate.toString())
+
+                listener.onConnectionStateChanged(
+                    ConnectionState.LIVE,
+                    "通話中：${settings.frontendVoiceModel} ⇄ ${settings.backendBrainModel}"
+                )
+            } catch (e: Exception) {
+                isToolCallRunning = false
+                isDelegationActive = false
+            }
         }
     }
 
@@ -829,13 +987,20 @@ class LiveSessionManager(
         val cleanText = text.trim()
         if (cleanText.isEmpty()) return
 
-        userTurnCounter++
+        if (userCharsInTurn > 0 || voiceCharsInTurn > 0) {
+            advanceToNextTurn()
+        }
+        val turnIdx = currentTurnIndex
+        userCharsInTurn += cleanText.length
+        lastUserDeltaWallMs = System.currentTimeMillis()
+
         listener.onTranscriptDelta(
             role = MessageRole.USER,
             delta = cleanText,
             timelineMs = System.currentTimeMillis(),
             modelTag = "User (文字輸入)",
-            streamKey = "typed_${UUID.randomUUID().toString().take(8)}"
+            streamKey = "turn_${sessionEpochId}_${turnIdx}_user",
+            turnIndex = turnIdx
         )
 
         val ws = webSocket
@@ -874,14 +1039,15 @@ class LiveSessionManager(
                             settings = activeSettings,
                             conversationHistory = conversationSnapshotProvider(),
                             taskHint = cleanText,
-                            onSearchExecuted = { listener.onSearchCardAdded(it) },
+                            onSearchExecuted = { listener.onSearchCardAdded(it, turnIdx) },
                             onCalendarActionLogged = { calNote ->
                                 listener.onTranscriptDelta(
                                     role = MessageRole.SYSTEM,
                                     delta = calNote,
                                     timelineMs = System.currentTimeMillis(),
                                     modelTag = "Calendar",
-                                    streamKey = "cal_${UUID.randomUUID().toString().take(8)}"
+                                    streamKey = "turn_${sessionEpochId}_${turnIdx}_cal_${UUID.randomUUID().toString().take(6)}",
+                                    turnIndex = turnIdx
                                 )
                             }
                         )
@@ -891,7 +1057,8 @@ class LiveSessionManager(
                                 delta = brain.detailedNotes,
                                 timelineMs = System.currentTimeMillis(),
                                 modelTag = activeSettings.backendBrainModel,
-                                streamKey = "backend_typed_${UUID.randomUUID().toString().take(8)}"
+                                streamKey = "turn_${sessionEpochId}_${turnIdx}_backend",
+                                turnIndex = turnIdx
                             )
                             ws.send(JSONObject().apply {
                                 put("type", "session.commentary.append")

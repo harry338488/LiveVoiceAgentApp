@@ -15,12 +15,12 @@ enum class DelegationMode(val apiValue: String, val label: String) {
     CLIENT("client", "Client 本機跨廠牌委派 (App 攔截並呼叫任意後端 API)")
 }
 
-enum class MessageRole {
-    USER,
-    ASSISTANT_VOICE,
-    BACKEND_BRAIN,
-    WEB_SEARCH,
-    SYSTEM
+enum class MessageRole(val sortPriorityInTurn: Int) {
+    USER(1),
+    ASSISTANT_VOICE(2),
+    BACKEND_BRAIN(3),
+    WEB_SEARCH(4),
+    SYSTEM(5)
 }
 
 data class SearchSource(
@@ -46,19 +46,39 @@ data class SearchSource(
 data class ChatMessage(
     val id: String = UUID.randomUUID().toString(),
     val streamKey: String = id,
+    val turnIndex: Int = 0,
     val role: MessageRole,
     val text: String,
+    val backendThinkingText: String = "",
+    val backendModelTag: String = "",
+    val searchQueriesAndSummaries: List<String> = emptyList(),
+    val calendarActionLogs: List<String> = emptyList(),
     val timestampMs: Long = System.currentTimeMillis(),
     val sessionTimelineMs: Long = 0L,
     val modelTag: String = "",
     val sources: List<SearchSource> = emptyList(),
     val isStreaming: Boolean = false
 ) {
+    val hasThinkingDetails: Boolean
+        get() = backendThinkingText.isNotBlank() ||
+                searchQueriesAndSummaries.isNotEmpty() ||
+                calendarActionLogs.isNotEmpty() ||
+                sources.isNotEmpty()
+
     fun toJson(): JSONObject = JSONObject().apply {
         put("id", id)
         put("streamKey", streamKey)
+        put("turnIndex", turnIndex)
         put("role", role.name)
         put("text", text)
+        put("backendThinkingText", backendThinkingText)
+        put("backendModelTag", backendModelTag)
+        val searchArr = JSONArray()
+        searchQueriesAndSummaries.forEach { searchArr.put(it) }
+        put("searchQueriesAndSummaries", searchArr)
+        val calArr = JSONArray()
+        calendarActionLogs.forEach { calArr.put(it) }
+        put("calendarActionLogs", calArr)
         put("timestampMs", timestampMs)
         put("sessionTimelineMs", sessionTimelineMs)
         put("modelTag", modelTag)
@@ -76,6 +96,22 @@ data class ChatMessage(
                     srcArr.optJSONObject(i)?.let { srcList.add(SearchSource.fromJson(it)) }
                 }
             }
+            val searchList = mutableListOf<String>()
+            val searchArr = obj.optJSONArray("searchQueriesAndSummaries")
+            if (searchArr != null) {
+                for (i in 0 until searchArr.length()) {
+                    val s = searchArr.optString(i, "")
+                    if (s.isNotBlank()) searchList.add(s)
+                }
+            }
+            val calList = mutableListOf<String>()
+            val calArr = obj.optJSONArray("calendarActionLogs")
+            if (calArr != null) {
+                for (i in 0 until calArr.length()) {
+                    val c = calArr.optString(i, "")
+                    if (c.isNotBlank()) calList.add(c)
+                }
+            }
             val roleStr = obj.optString("role", MessageRole.ASSISTANT_VOICE.name)
             val parsedRole = runCatching { MessageRole.valueOf(roleStr) }
                 .getOrDefault(MessageRole.ASSISTANT_VOICE)
@@ -84,8 +120,13 @@ data class ChatMessage(
             return ChatMessage(
                 id = msgId,
                 streamKey = obj.optString("streamKey", msgId),
+                turnIndex = obj.optInt("turnIndex", 0),
                 role = parsedRole,
                 text = obj.optString("text", ""),
+                backendThinkingText = obj.optString("backendThinkingText", ""),
+                backendModelTag = obj.optString("backendModelTag", ""),
+                searchQueriesAndSummaries = searchList,
+                calendarActionLogs = calList,
                 timestampMs = obj.optLong("timestampMs", System.currentTimeMillis()),
                 sessionTimelineMs = obj.optLong("sessionTimelineMs", 0L),
                 modelTag = obj.optString("modelTag", ""),
