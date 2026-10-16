@@ -24,11 +24,17 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Build Debug APK
-        run: gradle assembleDebug --no-daemon
+      - name: Build Signed Release and Debug APKs
+        run: gradle assembleRelease assembleDebug --no-daemon
 
-      - name: Upload APK Artifact
+      - name: Upload Signed Release APK
         uses: actions/upload-artifact@v4
         with:
-          name: LiveVoiceAgent-debug-apk
+          name: LiveVoiceAgent-Release-APK
+          path: app/build/outputs/apk/release/app-release.apk
+
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: LiveVoiceAgent-Debug-APK
           path: app/build/outputs/apk/debug/app-debug.apk
