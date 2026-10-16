@@ -416,10 +416,13 @@ private fun ChatMessageItem(
     }
 
     val isUser = message.role == MessageRole.USER
+    val isCollapsibleNote = message.role == MessageRole.BACKEND_BRAIN || message.role == MessageRole.WEB_SEARCH
+    var isExpanded by remember(message.id) { mutableStateOf(false) }
+
     val containerColor = when (message.role) {
         MessageRole.USER -> MaterialTheme.colorScheme.primaryContainer
         MessageRole.ASSISTANT_VOICE -> MaterialTheme.colorScheme.secondaryContainer
-        MessageRole.BACKEND_BRAIN -> MaterialTheme.colorScheme.tertiaryContainer
+        MessageRole.BACKEND_BRAIN -> MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.85f)
         MessageRole.WEB_SEARCH -> MaterialTheme.colorScheme.surfaceVariant
         MessageRole.SYSTEM -> MaterialTheme.colorScheme.errorContainer
     }
@@ -427,9 +430,9 @@ private fun ChatMessageItem(
     val roleLabel = when (message.role) {
         MessageRole.USER -> "🗣️ 你"
         MessageRole.ASSISTANT_VOICE -> "🎧 語音回覆 (${message.modelTag})"
-        MessageRole.BACKEND_BRAIN -> "🧠 後端模型重點詳情 (${message.modelTag})"
-        MessageRole.WEB_SEARCH -> "🌐 Linkup 網路搜尋與來源"
-        MessageRole.SYSTEM -> "⚙️ 系統"
+        MessageRole.BACKEND_BRAIN -> "🧠 後端模型重點筆記 (${message.modelTag})"
+        MessageRole.WEB_SEARCH -> "🌐 Linkup 網路搜尋與來源 (${message.sources.size} 筆)"
+        MessageRole.SYSTEM -> "⚙️ 系統紀錄"
     }
 
     Row(
@@ -437,7 +440,13 @@ private fun ChatMessageItem(
         horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
     ) {
         Card(
-            modifier = Modifier.widthIn(min = 120.dp, max = 340.dp),
+            modifier = if (isCollapsibleNote) {
+                Modifier
+                    .fillMaxWidth()
+                    .clickable { isExpanded = !isExpanded }
+            } else {
+                Modifier.widthIn(min = 120.dp, max = 340.dp)
+            },
             shape = RoundedCornerShape(
                 topStart = 16.dp,
                 topEnd = 16.dp,
@@ -457,12 +466,21 @@ private fun ChatMessageItem(
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier.weight(1f)
                     )
+                    if (isCollapsibleNote) {
+                        Text(
+                            text = if (isExpanded) "點擊收合 ▲" else "點擊展開詳情 ▼",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                    }
                     Text(
                         text = timeStr,
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
                     )
-                    Spacer(modifier = Modifier.width(4.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
                     Icon(
                         imageVector = Icons.Default.ContentCopy,
                         contentDescription = "複製",
@@ -476,10 +494,12 @@ private fun ChatMessageItem(
 
                 Text(
                     text = message.text,
-                    style = MaterialTheme.typography.bodyMedium
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = if (isCollapsibleNote && !isExpanded) 3 else Int.MAX_VALUE,
+                    overflow = TextOverflow.Ellipsis
                 )
 
-                if (message.sources.isNotEmpty()) {
+                if (message.sources.isNotEmpty() && (!isCollapsibleNote || isExpanded)) {
                     Spacer(modifier = Modifier.height(8.dp))
                     HorizontalDivider()
                     Spacer(modifier = Modifier.height(6.dp))

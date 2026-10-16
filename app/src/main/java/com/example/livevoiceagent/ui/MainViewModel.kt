@@ -15,6 +15,7 @@ import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
 data class UiState(
@@ -163,7 +164,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
                 delta = text.trim(),
                 timelineMs = System.currentTimeMillis(),
                 modelTag = "User (離線文字提問)",
-                forceNewBubble = true
+                streamKey = "offline_user_${UUID.randomUUID().toString().take(8)}"
             )
             _uiState.update {
                 it.copy(statusBanner = "正在呼叫後端模型 ${state.settings.backendBrainModel}...")
@@ -181,7 +182,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
                             delta = calNote,
                             timelineMs = System.currentTimeMillis(),
                             modelTag = "Android Calendar",
-                            forceNewBubble = true
+                            streamKey = "offline_cal_${UUID.randomUUID().toString().take(8)}"
                         )
                     }
                 )
@@ -191,7 +192,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
                         delta = brain.detailedNotes,
                         timelineMs = System.currentTimeMillis(),
                         modelTag = state.settings.backendBrainModel,
-                        forceNewBubble = true
+                        streamKey = "offline_backend_${UUID.randomUUID().toString().take(8)}"
                     )
                     onTurnCompleted()
                     _uiState.update { it.copy(statusBanner = "後端回覆完成（已自動儲存至對話紀錄）") }
@@ -320,25 +321,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
         persistCurrentSession()
     }
 
+    /**
+     * Merges incoming deltas by `streamKey` in-place so concurrent streams (User speech, Assistant Voice,
+     * Backend Brain, and Linkup Search) NEVER interrupt or fragment each other!
+     */
     override fun onTranscriptDelta(
         role: MessageRole,
         delta: String,
         timelineMs: Long,
         modelTag: String,
-        forceNewBubble: Boolean
+        streamKey: String
     ) {
         _uiState.update { state ->
             val currentMsgs = state.currentSession.messages.toMutableList()
-            val lastMsg = currentMsgs.lastOrNull()
+            val existingIdx = currentMsgs.indexOfLast { it.streamKey == streamKey }
 
-            if (!forceNewBubble && lastMsg != null && lastMsg.role == role) {
-                currentMsgs[currentMsgs.lastIndex] = lastMsg.copy(
-                    text = lastMsg.text + delta,
+            if (existingIdx >= 0) {
+                val existing = currentMsgs[existingIdx]
+                currentMsgs[existingIdx] = existing.copy(
+                    text = existing.text + delta,
                     timestampMs = System.currentTimeMillis()
                 )
             } else {
                 currentMsgs.add(
                     ChatMessage(
+                        streamKey = streamKey,
                         role = role,
                         text = delta,
                         sessionTimelineMs = timelineMs,
@@ -376,6 +383,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
             val currentMsgs = state.currentSession.messages.toMutableList()
             currentMsgs.add(
                 ChatMessage(
+                    streamKey = "search_${UUID.randomUUID().toString().take(8)}",
                     role = MessageRole.WEB_SEARCH,
                     text = "🔍 搜尋關鍵字：「${result.query}」\n\n${result.answer}",
                     modelTag = "Linkup Search",

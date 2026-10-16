@@ -22,7 +22,13 @@ enum class ConnectionState(val label: String) {
 interface LiveSessionListener {
     fun onConnectionStateChanged(state: ConnectionState, statusText: String)
     fun onRemoteSessionIdResolved(sessionId: String)
-    fun onTranscriptDelta(role: MessageRole, delta: String, timelineMs: Long, modelTag: String, forceNewBubble: Boolean)
+    fun onTranscriptDelta(
+        role: MessageRole,
+        delta: String,
+        timelineMs: Long,
+        modelTag: String,
+        streamKey: String
+    )
     fun onSearchCardAdded(result: LinkupSearchResult)
     fun onTurnCompleted()
     fun onMicLevelChanged(level: Float)
@@ -56,9 +62,16 @@ class LiveSessionManager(
     @Volatile
     private var isClosing: Boolean = false
 
+    // Independent stream trackers so User speech, Assistant Voice, Backend Brain, and Linkup Search NEVER split or interrupt each other!
+    private var sessionEpochId: String = UUID.randomUUID().toString().take(6)
+    private var userTurnCounter: Int = 1
+    private var voiceTurnCounter: Int = 1
+    private var backendTurnCounter: Int = 1
+
     private var lastUserTranscriptEndMs: Long = -10_000L
     private var lastAssistantTranscriptEndMs: Long = -10_000L
-    private var lastSpeakerRole: MessageRole? = null
+    private var assistantCharsInCurrentTurn: Int = 0
+    private var userCharsInCurrentTurn: Int = 0
 
     fun connect(
         settings: AppSettings,
@@ -70,9 +83,15 @@ class LiveSessionManager(
         activeSettings = settings
         sessionStarted = false
         isClosing = false
+
+        sessionEpochId = UUID.randomUUID().toString().take(6)
+        userTurnCounter = 1
+        voiceTurnCounter = 1
+        backendTurnCounter = 1
         lastUserTranscriptEndMs = -10_000L
         lastAssistantTranscriptEndMs = -10_000L
-        lastSpeakerRole = null
+        assistantCharsInCurrentTurn = 0
+        userCharsInCurrentTurn = 0
 
         val frontModel = settings.frontendVoiceModel.trim().ifBlank { "gpt-live-1" }
         activeProtocol = when {
@@ -177,10 +196,6 @@ class LiveSessionManager(
         })
     }
 
-    /**
-     * Builds and sends `session.start` for OpenAI `/v1/live/sessions` (`gpt-live-1` / `gpt-live-1.1`).
-     * Automatically injects real-time Date/Time/Timezone context and registers Linkup + Calendar tools.
-     */
     private fun sendOpenAiLiveSessionStart(
         ws: WebSocket,
         settings: AppSettings,
@@ -310,15 +325,23 @@ class LiveSessionManager(
                 val startMs = event.optLong("start_ms", 0L)
                 val endMs = event.optLong("end_ms", startMs)
                 if (delta.isNotEmpty()) {
-                    val forceNew = lastSpeakerRole != MessageRole.USER || (startMs - lastUserTranscriptEndMs > 3500L)
-                    lastUserTranscriptEndMs = endMs
-                    lastSpeakerRole = MessageRole.USER
+                    val gapMs = startMs - lastUserTranscriptEndMs
+                    // Start a new user bubble ONLY if the user paused for > 5.5s, or if the AI already gave a full reply (> 25 chars) and user paused > 2.2s
+                    if (lastUserTranscriptEndMs >= 0L && (gapMs > 5500L || (assistantCharsInCurrentTurn > 25 && gapMs > 2200L))) {
+                        userTurnCounter++
+                        userCharsInCurrentTurn = 0
+                        assistantCharsInCurrentTurn = 0
+                    }
+                    lastUserTranscriptEndMs = maxOf(lastUserTranscriptEndMs, endMs)
+                    userCharsInCurrentTurn += delta.length
+
+                    val streamKey = "user_${sessionEpochId}_$userTurnCounter"
                     listener.onTranscriptDelta(
                         role = MessageRole.USER,
                         delta = delta,
                         timelineMs = startMs,
                         modelTag = "User",
-                        forceNewBubble = forceNew
+                        streamKey = streamKey
                     )
                 }
             }
@@ -328,15 +351,22 @@ class LiveSessionManager(
                 val startMs = event.optLong("start_ms", 0L)
                 val endMs = event.optLong("end_ms", startMs)
                 if (delta.isNotEmpty()) {
-                    val forceNew = lastSpeakerRole != MessageRole.ASSISTANT_VOICE || (startMs - lastAssistantTranscriptEndMs > 4000L)
-                    lastAssistantTranscriptEndMs = endMs
-                    lastSpeakerRole = MessageRole.ASSISTANT_VOICE
+                    val gapMs = startMs - lastAssistantTranscriptEndMs
+                    // Start a new assistant voice bubble ONLY if the assistant paused for > 5s, or if user spoke a new turn (> 6 chars) and assistant paused > 1.8s
+                    if (lastAssistantTranscriptEndMs >= 0L && (gapMs > 5000L || (userCharsInCurrentTurn > 6 && gapMs > 1800L))) {
+                        voiceTurnCounter++
+                        userCharsInCurrentTurn = 0
+                    }
+                    lastAssistantTranscriptEndMs = maxOf(lastAssistantTranscriptEndMs, endMs)
+                    assistantCharsInCurrentTurn += delta.length
+
+                    val streamKey = "voice_${sessionEpochId}_$voiceTurnCounter"
                     listener.onTranscriptDelta(
                         role = MessageRole.ASSISTANT_VOICE,
                         delta = delta,
                         timelineMs = startMs,
                         modelTag = settings.frontendVoiceModel,
-                        forceNewBubble = forceNew
+                        streamKey = streamKey
                     )
                     listener.onTurnCompleted()
                 }
@@ -367,7 +397,7 @@ class LiveSessionManager(
                                     delta = calNote,
                                     timelineMs = System.currentTimeMillis(),
                                     modelTag = "Calendar",
-                                    forceNewBubble = true
+                                    streamKey = "cal_${UUID.randomUUID().toString().take(8)}"
                                 )
                             }
                         )
@@ -378,7 +408,7 @@ class LiveSessionManager(
                                     delta = brainResp.detailedNotes,
                                     timelineMs = System.currentTimeMillis(),
                                     modelTag = settings.backendBrainModel,
-                                    forceNewBubble = true
+                                    streamKey = "backend_$delegationId"
                                 )
                             }
                             val commentaryEvent = JSONObject().apply {
@@ -405,23 +435,25 @@ class LiveSessionManager(
             }
 
             "response.event" -> {
+                val delegationId = event.optString("delegation_id", "").ifBlank { "resp_$backendTurnCounter" }
                 val inner = event.optJSONObject("event") ?: return
                 val innerType = inner.optString("type", "")
                 when (innerType) {
                     "response.created" -> {
-                        lastSpeakerRole = MessageRole.BACKEND_BRAIN
+                        backendTurnCounter++
                     }
                     "response.output_text.delta" -> {
                         val delta = inner.optString("delta", "")
+                        val itemId = inner.optString("item_id", delegationId)
                         if (delta.isNotEmpty()) {
-                            val forceNew = lastSpeakerRole != MessageRole.BACKEND_BRAIN
-                            lastSpeakerRole = MessageRole.BACKEND_BRAIN
+                            // Uses its own dedicated streamKey ("backend_<delegationId>_<itemId>") so it NEVER collides with voice or user text!
+                            val backendStreamKey = "backend_${delegationId}_$itemId"
                             listener.onTranscriptDelta(
                                 role = MessageRole.BACKEND_BRAIN,
                                 delta = delta,
                                 timelineMs = System.currentTimeMillis(),
                                 modelTag = settings.backendBrainModel,
-                                forceNewBubble = forceNew
+                                streamKey = backendStreamKey
                             )
                         }
                     }
@@ -465,9 +497,6 @@ class LiveSessionManager(
         }
     }
 
-    /**
-     * Handles custom function tool calls (`linkup_web_search` and Android Calendar tools) in Responses Delegation mode.
-     */
     private fun handleResponsesFunctionToolCall(
         webSocket: WebSocket,
         callId: String,
@@ -517,7 +546,7 @@ class LiveSessionManager(
                         delta = "📅 行事曆操作 (`$fnName`):\n$calJson",
                         timelineMs = System.currentTimeMillis(),
                         modelTag = "Android Calendar",
-                        forceNewBubble = true
+                        streamKey = "cal_$callId"
                     )
                     toolOutputText = calJson
                 }
@@ -527,7 +556,6 @@ class LiveSessionManager(
                 }
             }
 
-            // 1. Send response.item.create with function_call_output
             val itemCreateEvent = JSONObject().apply {
                 put("type", "response.item.create")
                 put("event_id", "tool_res_${UUID.randomUUID().toString().take(8)}")
@@ -539,7 +567,6 @@ class LiveSessionManager(
             }
             webSocket.send(itemCreateEvent.toString())
 
-            // 2. Send response.create to resume the delegated Responses backend
             val continueEvent = JSONObject().apply {
                 put("type", "response.create")
                 put("event_id", "continue_${UUID.randomUUID().toString().take(8)}")
@@ -552,7 +579,6 @@ class LiveSessionManager(
         val timeContext = CalendarToolManager.buildCurrentTimeContextString()
         val toolsArr = JSONArray()
 
-        // 1. Delegate to Backend Brain LLM tool
         toolsArr.put(JSONObject().apply {
             put("type", "function")
             put("name", "delegate_to_backend_brain")
@@ -572,12 +598,10 @@ class LiveSessionManager(
             })
         })
 
-        // 2. Direct Linkup Web Search tool
         if (settings.linkupSearchEnabled && settings.linkupApiKey.isNotBlank()) {
             toolsArr.put(LinkupSearchClient.buildResponsesToolSchema())
         }
 
-        // 3. Direct Android Calendar tools
         if (settings.calendarToolsEnabled) {
             CalendarToolManager.buildResponsesCalendarToolSchemas().forEach { toolsArr.put(it) }
         }
@@ -622,15 +646,15 @@ class LiveSessionManager(
 
             "conversation.item.input_audio_transcription.completed" -> {
                 val transcript = event.optString("transcript", "")
+                val itemId = event.optString("item_id", "${userTurnCounter++}")
                 if (transcript.isNotBlank()) {
                     listener.onTranscriptDelta(
                         role = MessageRole.USER,
                         delta = transcript,
                         timelineMs = System.currentTimeMillis(),
                         modelTag = "User",
-                        forceNewBubble = true
+                        streamKey = "rt_user_$itemId"
                     )
-                    lastSpeakerRole = MessageRole.USER
                 }
             }
 
@@ -643,20 +667,20 @@ class LiveSessionManager(
 
             "response.audio_transcript.delta", "response.output_audio_transcript.delta" -> {
                 val delta = event.optString("delta", "")
+                val itemId = event.optString("item_id", event.optString("response_id", "$voiceTurnCounter"))
                 if (delta.isNotEmpty()) {
-                    val forceNew = lastSpeakerRole != MessageRole.ASSISTANT_VOICE
-                    lastSpeakerRole = MessageRole.ASSISTANT_VOICE
                     listener.onTranscriptDelta(
                         role = MessageRole.ASSISTANT_VOICE,
                         delta = delta,
                         timelineMs = System.currentTimeMillis(),
                         modelTag = settings.frontendVoiceModel,
-                        forceNewBubble = forceNew
+                        streamKey = "rt_voice_$itemId"
                     )
                 }
             }
 
             "response.done" -> {
+                voiceTurnCounter++
                 listener.onTurnCompleted()
             }
 
@@ -716,7 +740,7 @@ class LiveSessionManager(
                         delta = "📅 行事曆操作 (`$fnName`):\n$calJson",
                         timelineMs = System.currentTimeMillis(),
                         modelTag = "Android Calendar",
-                        forceNewBubble = true
+                        streamKey = "cal_$callId"
                     )
                     outputText = calJson
                 }
@@ -740,7 +764,7 @@ class LiveSessionManager(
                                 delta = calNote,
                                 timelineMs = System.currentTimeMillis(),
                                 modelTag = "Calendar",
-                                forceNewBubble = true
+                                streamKey = "cal_${UUID.randomUUID().toString().take(8)}"
                             )
                         }
                     )
@@ -752,7 +776,7 @@ class LiveSessionManager(
                                     delta = brainResp.detailedNotes,
                                     timelineMs = System.currentTimeMillis(),
                                     modelTag = settings.backendBrainModel,
-                                    forceNewBubble = true
+                                    streamKey = "backend_$callId"
                                 )
                             }
                             brainResp.spokenSummary
@@ -805,14 +829,14 @@ class LiveSessionManager(
         val cleanText = text.trim()
         if (cleanText.isEmpty()) return
 
+        userTurnCounter++
         listener.onTranscriptDelta(
             role = MessageRole.USER,
             delta = cleanText,
             timelineMs = System.currentTimeMillis(),
             modelTag = "User (文字輸入)",
-            forceNewBubble = true
+            streamKey = "typed_${UUID.randomUUID().toString().take(8)}"
         )
-        lastSpeakerRole = MessageRole.USER
 
         val ws = webSocket
         if (ws == null || !sessionStarted) return
@@ -857,7 +881,7 @@ class LiveSessionManager(
                                     delta = calNote,
                                     timelineMs = System.currentTimeMillis(),
                                     modelTag = "Calendar",
-                                    forceNewBubble = true
+                                    streamKey = "cal_${UUID.randomUUID().toString().take(8)}"
                                 )
                             }
                         )
@@ -867,7 +891,7 @@ class LiveSessionManager(
                                 delta = brain.detailedNotes,
                                 timelineMs = System.currentTimeMillis(),
                                 modelTag = activeSettings.backendBrainModel,
-                                forceNewBubble = true
+                                streamKey = "backend_typed_${UUID.randomUUID().toString().take(8)}"
                             )
                             ws.send(JSONObject().apply {
                                 put("type", "session.commentary.append")

@@ -45,6 +45,7 @@ data class SearchSource(
 
 data class ChatMessage(
     val id: String = UUID.randomUUID().toString(),
+    val streamKey: String = id,
     val role: MessageRole,
     val text: String,
     val timestampMs: Long = System.currentTimeMillis(),
@@ -55,6 +56,7 @@ data class ChatMessage(
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("id", id)
+        put("streamKey", streamKey)
         put("role", role.name)
         put("text", text)
         put("timestampMs", timestampMs)
@@ -77,9 +79,11 @@ data class ChatMessage(
             val roleStr = obj.optString("role", MessageRole.ASSISTANT_VOICE.name)
             val parsedRole = runCatching { MessageRole.valueOf(roleStr) }
                 .getOrDefault(MessageRole.ASSISTANT_VOICE)
+            val msgId = obj.optString("id", UUID.randomUUID().toString())
 
             return ChatMessage(
-                id = obj.optString("id", UUID.randomUUID().toString()),
+                id = msgId,
+                streamKey = obj.optString("streamKey", msgId),
                 role = parsedRole,
                 text = obj.optString("text", ""),
                 timestampMs = obj.optLong("timestampMs", System.currentTimeMillis()),
