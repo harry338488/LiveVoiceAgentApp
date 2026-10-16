@@ -11,8 +11,8 @@ android {
         applicationId = "com.harry338488.livevoiceagent"
         minSdk = 26
         targetSdk = 34
-        versionCode = 4
-        versionName = "1.0.3"
+        versionCode = 5
+        versionName = "1.0.4"
 
         vectorDrawables {
             useSupportLibrary = true
@@ -21,6 +21,10 @@ android {
 
     signingConfigs {
         getByName("debug") {
+            storeFile = file("fixed-debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
             enableV1Signing = true
             enableV2Signing = true
             enableV3Signing = true
