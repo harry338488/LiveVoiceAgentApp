@@ -103,4 +103,29 @@ object TraditionalChineseConverter {
         }
         return sb.toString()
     }
+
+    /**
+     * Applies user-defined custom terminology / replacement rules (e.g. "雷姆=蕾姆", "科沃斯->CoWoS")
+     * to transcripts in real time.
+     */
+    fun applyCustomGlossary(text: String, rawGlossary: String): String {
+        if (text.isEmpty() || rawGlossary.isBlank()) return text
+        var result = text
+        val entries = rawGlossary.split('\n', ',', '，', ';', '；')
+        for (entry in entries) {
+            val trimmed = entry.trim()
+            if (trimmed.isEmpty()) continue
+            val delimiter = listOf("->", "=>", "=", "＝", ":")
+                .firstOrNull { trimmed.contains(it) }
+            if (delimiter != null) {
+                val wrongTerm = trimmed.substringBefore(delimiter).trim()
+                val rightTerm = trimmed.substringAfter(delimiter).trim()
+                if (wrongTerm.isNotEmpty() && rightTerm.isNotEmpty()) {
+                    result = result.replace(wrongTerm, rightTerm, ignoreCase = true)
+                }
+            }
+        }
+        return result
+    }
 }
+

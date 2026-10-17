@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Outer Halo Glow -->
+    <path android:pathData="M54,54m-27,0a27,27 0,1 1,54 0a27,27 0,1 1,-54 0">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:centerX="54"
+                android:centerY="54"
+                android:gradientRadius="27"
+                android:type="radial">
+                <item android:offset="0.0" android:color="#5538BDF8" />
+                <item android:offset="0.7" android:color="#288B5CF6" />
+                <item android:offset="1.0" android:color="#00000000" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- 3D Fluid Voice Orb Core -->
+    <path android:pathData="M54,54m-22,0a22,22 0,1 1,44 0a22,22 0,1 1,-44 0">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="34"
+                android:startY="32"
+                android:endX="74"
+                android:endY="76"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#38BDF8" />
+                <item android:offset="0.48" android:color="#6366F1" />
+                <item android:offset="1.0" android:color="#C084FC" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Inner Glassmorphic Dark Core for Contrast -->
+    <path android:pathData="M54,54m-18.5,0a18.5,18.5 0,1 1,37 0a18.5,18.5 0,1 1,-37 0">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="38"
+                android:startY="36"
+                android:endX="70"
+                android:endY="72"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#111C35" />
+                <item android:offset="1.0" android:color="#1E153A" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Luminous Rim Highlight on Orb -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M54,54m-21.5,0a21.5,21.5 0,1 1,43 0a21.5,21.5 0,1 1,-43 0"
+        android:strokeWidth="1.4"
+        android:strokeColor="#887DD3FC" />
+
+    <!-- Orbiting Simultaneous Translation Arc (Emerald-Cyan Accent) -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M30,46 A25,25 0 0,1 78,46"
+        android:strokeWidth="1.8"
+        android:strokeLineCap="round"
+        android:strokeColor="#9934D399" />
+
+    <!-- 5 Symmetrical Harmonic Soundwave Bars inside the Orb -->
+    <!-- Left Outer Bar -->
+    <path
+        android:fillColor="#E0F2FE"
+        android:pathData="M41.5,49.5 L41.5,58.5"
+        android:strokeWidth="3.2"
+        android:strokeLineCap="round"
+        android:strokeColor="#7DD3FC" />
+
+    <!-- Left Mid Bar -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M47.7,44.5 L47.7,63.5"
+        android:strokeWidth="3.4"
+        android:strokeLineCap="round"
+        android:strokeColor="#BAE6FD" />
+
+    <!-- Center Peak Voice Bar -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,39.5 L54,68.5"
+        android:strokeWidth="3.8"
+        android:strokeLineCap="round"
+        android:strokeColor="#FFFFFF" />
+
+    <!-- Right Mid Bar -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M60.3,44.5 L60.3,63.5"
+        android:strokeWidth="3.4"
+        android:strokeLineCap="round"
+        android:strokeColor="#DDD6FE" />
+
+    <!-- Right Outer Bar -->
+    <path
+        android:fillColor="#E0F2FE"
+        android:pathData="M66.5,49.5 L66.5,58.5"
+        android:strokeWidth="3.2"
+        android:strokeLineCap="round"
+        android:strokeColor="#C084FC" />
+
+    <!-- AI Sparkle Star at Top-Right of Orb -->
+    <path
+        android:fillColor="#34D399"
+        android:pathData="M72,31 L73.4,34.6 L77,36 L73.4,37.4 L72,41 L70.6,37.4 L67,36 L70.6,34.6 Z" />
+</vector>

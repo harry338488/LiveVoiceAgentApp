@@ -1,12 +1,107 @@
+<?xml version="1.0" encoding="utf-8"?>
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+
+    <!-- Deep Midnight Obsidian Base Gradient -->
+    <path android:pathData="M0,0h108v108h-108z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="0"
+                android:startY="0"
+                android:endX="108"
+                android:endY="108"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#050811" />
+                <item android:offset="0.5" android:color="#0D1528" />
+                <item android:offset="1.0" android:color="#191636" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Ambient Radial Cyan-Violet Aurora Glow -->
+    <path android:pathData="M0,0h108v108h-108z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:centerX="54"
+                android:centerY="54"
+                android:gradientRadius="52"
+                android:type="radial">
+                <item android:offset="0.0" android:color="#4038BDF8" />
+                <item android:offset="0.55" android:color="#228B5CF6" />
+                <item android:offset="1.0" android:color="#00050811" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- 3D Fluid Voice Orb Core -->
+    <path android:pathData="M54,54m-24,0a24,24 0,1 1,48 0a24,24 0,1 1,-48 0">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="32"
+                android:startY="30"
+                android:endX="76"
+                android:endY="78"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#38BDF8" />
+                <item android:offset="0.48" android:color="#6366F1" />
+                <item android:offset="1.0" android:color="#C084FC" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Inner Glassmorphic Dark Core -->
+    <path android:pathData="M54,54m-20,0a20,20 0,1 1,40 0a20,20 0,1 1,-40 0">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="36"
+                android:startY="34"
+                android:endX="72"
+                android:endY="74"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#111C35" />
+                <item android:offset="1.0" android:color="#1E153A" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- 5 Symmetrical Harmonic Soundwave Bars -->
     <path
-        android:fillColor="#1E88E5"
-        android:pathData="M0,0h108v108h-108z" />
+        android:fillColor="#E0F2FE"
+        android:pathData="M41.5,49.5 L41.5,58.5"
+        android:strokeWidth="3.2"
+        android:strokeLineCap="round"
+        android:strokeColor="#7DD3FC" />
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M54,28c-6.6,0 -12,5.4 -12,12v14c0,6.6 5.4,12 12,12s12,-5.4 12,-12V40C66,33.4 60.6,28 54,28zM72,54c0,10 -8.1,18 -18,18s-18,-8 -18,-18h-6c0,12.2 9.2,22.2 21,23.7V86h6v-8.3c11.8,-1.5 21,-11.5 21,-23.7H72z" />
+        android:pathData="M47.7,44.5 L47.7,63.5"
+        android:strokeWidth="3.4"
+        android:strokeLineCap="round"
+        android:strokeColor="#BAE6FD" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,39.5 L54,68.5"
+        android:strokeWidth="3.8"
+        android:strokeLineCap="round"
+        android:strokeColor="#FFFFFF" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M60.3,44.5 L60.3,63.5"
+        android:strokeWidth="3.4"
+        android:strokeLineCap="round"
+        android:strokeColor="#DDD6FE" />
+    <path
+        android:fillColor="#E0F2FE"
+        android:pathData="M66.5,49.5 L66.5,58.5"
+        android:strokeWidth="3.2"
+        android:strokeLineCap="round"
+        android:strokeColor="#C084FC" />
+
+    <!-- AI Sparkle Star -->
+    <path
+        android:fillColor="#34D399"
+        android:pathData="M73,30 L74.4,33.6 L78,35 L74.4,36.4 L73,40 L71.6,36.4 L68,35 L71.6,33.6 Z" />
 </vector>

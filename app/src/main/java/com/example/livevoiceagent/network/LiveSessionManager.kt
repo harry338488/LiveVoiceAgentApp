@@ -134,8 +134,13 @@ class LiveSessionManager(
         lastBackendItemId = ""
 
         val frontModel = settings.frontendVoiceModel.trim().ifBlank { "gpt-live-1" }
+        val isTranslateModeRequested =
+            settings.protocol == LiveProtocol.OPENAI_TRANSLATE || frontModel.lowercase().contains("translate")
+
         activeProtocol = when {
-            settings.protocol == LiveProtocol.OPENAI_TRANSLATE || frontModel.lowercase().contains("translate") ->
+            isTranslateModeRequested && settings.usePromptAwareInterpreter ->
+                LiveProtocol.OPENAI_LIVE
+            isTranslateModeRequested ->
                 LiveProtocol.OPENAI_TRANSLATE
             frontModel.lowercase().startsWith("grok") || settings.protocol == LiveProtocol.XAI_REALTIME ->
                 LiveProtocol.XAI_REALTIME
@@ -167,10 +172,13 @@ class LiveSessionManager(
             LiveProtocol.XAI_REALTIME -> "wss://api.x.ai/v1/realtime?model=$frontModel"
         }
 
-        val connectingLabel = if (activeProtocol == LiveProtocol.OPENAI_TRANSLATE) {
-            "正在啟動 gpt-realtime-translate 同步口譯 (目標: ${AppSettings.languageLabel(settings.translationTargetLanguage)})..."
-        } else {
-            "正在連線至 $frontModel (後端: ${settings.backendBrainModel})..."
+        val connectingLabel = when {
+            activeProtocol == LiveProtocol.OPENAI_TRANSLATE ->
+                "正在啟動 gpt-realtime-translate 同步口譯 (輸出: ${AppSettings.languageLabel(settings.translationTargetLanguage)})..."
+            isTranslateModeRequested && settings.usePromptAwareInterpreter ->
+                "正在啟動 Prompt 智慧詞庫口譯 (輸出: ${AppSettings.languageLabel(settings.translationTargetLanguage)})..."
+            else ->
+                "正在連線至 $frontModel (後端: ${settings.backendBrainModel})..."
         }
         listener.onConnectionStateChanged(ConnectionState.CONNECTING, connectingLabel)
 
@@ -260,14 +268,78 @@ class LiveSessionManager(
         })
     }
 
+    private fun isPromptAwareInterpreterMode(settings: AppSettings): Boolean {
+        val isTranslateRequested =
+            settings.protocol == LiveProtocol.OPENAI_TRANSLATE ||
+                    settings.frontendVoiceModel.lowercase().contains("translate")
+        return isTranslateRequested && settings.usePromptAwareInterpreter
+    }
+
+    private fun buildCustomGlossaryPromptBlock(settings: AppSettings): String {
+        val sb = StringBuilder()
+        if (settings.translationContextPrompt.isNotBlank()) {
+            sb.append("\n【情境背景與翻譯風格提示】：\n${settings.translationContextPrompt.trim()}\n")
+        }
+        if (settings.customGlossaryTerms.isNotBlank()) {
+            sb.append("\n【專屬詞彙庫與專有名詞對照（辨識與輸出時請務必優先採用以下正確詞彙）】：\n${settings.customGlossaryTerms.trim()}\n")
+        }
+        return sb.toString()
+    }
+
     private fun sendOpenAiLiveSessionStart(
         ws: WebSocket,
         settings: AppSettings,
         priorMessages: List<ChatMessage>
     ) {
-        val frontModel = settings.frontendVoiceModel.trim().ifBlank { "gpt-live-1" }
+        val promptInterpreter = isPromptAwareInterpreterMode(settings)
+        val rawFront = settings.frontendVoiceModel.trim().ifBlank { "gpt-live-1" }
+        val frontModel = if (promptInterpreter && rawFront.lowercase().contains("translate")) {
+            "gpt-live-1"
+        } else {
+            rawFront
+        }
         val backModel = settings.backendBrainModel.trim().ifBlank { "gpt-6-luna" }
         val timeContext = CalendarToolManager.buildCurrentTimeContextString()
+        val glossaryBlock = buildCustomGlossaryPromptBlock(settings)
+
+        if (promptInterpreter) {
+            isClientDelegationSession = true
+            val targetLabel = AppSettings.languageLabel(settings.translationTargetLanguage)
+            val secondaryLabel = AppSettings.languageLabel(settings.translationSecondaryLanguage)
+            val interpreterInstructions = buildString {
+                appendLine("你是專業的即時雙向口譯官（Simultaneous & Consecutive Interpreter）。")
+                appendLine("1. 核心任務：自動辨識說話者使用的任何語言（支援 70+ 國語言及中英日混講），並立即、精準、自然地口譯為目標輸出語言：【$targetLabel】。")
+                appendLine("2. 雙向智慧切換：如果說話者講的語言已經是【$targetLabel】，請自動將其翻譯為第二常用語言：【$secondaryLabel】。")
+                appendLine("3. 嚴格口譯守則：絕對不要回答問題、不要順著說話者的話題聊天或解釋，只輸出翻譯後的語句！")
+                if (glossaryBlock.isNotBlank()) {
+                    appendLine(glossaryBlock)
+                }
+            }
+
+            val sessionObj = JSONObject().apply {
+                put("model", frontModel)
+                put("instructions", interpreterInstructions)
+                put("audio", JSONObject().apply {
+                    put("format", JSONObject().apply {
+                        put("type", "audio/pcm")
+                        put("rate", 24000)
+                    })
+                    put("output", JSONObject().apply {
+                        put("voice", settings.voiceName.ifBlank { "marin" })
+                    })
+                })
+                put("delegation", JSONObject().apply {
+                    put("type", "client")
+                })
+            }
+
+            ws.send(JSONObject().apply {
+                put("type", "session.start")
+                put("event_id", "event_start_${UUID.randomUUID().toString().take(8)}")
+                put("session", sessionObj)
+            }.toString())
+            return
+        }
 
         // IMPORTANT: In OpenAI /v1/live/sessions, client-side tools (Linkup API & Android Calendar)
         // MUST use `delegation: { type: "client" }` (`session.thinking.append` + `session.commentary.append`),
@@ -287,7 +359,7 @@ class LiveSessionManager(
 
         val sessionObj = JSONObject().apply {
             put("model", frontModel)
-            put("instructions", "$timeContext\n\n${settings.voiceSystemInstructions}\n（補充：當後端正在查詢資料或搜尋時，你可以繼續自然地與使用者閒聊互動，直到收到後端結果為止。）")
+            put("instructions", "$timeContext\n\n${settings.voiceSystemInstructions}$glossaryBlock\n（補充：當後端正在查詢資料或搜尋時，你可以繼續自然地與使用者閒聊互動，直到收到後端結果為止。）")
 
             val seedArray = buildSeedInputArray(priorMessages)
             if (seedArray.length() > 0) {
@@ -318,7 +390,7 @@ class LiveSessionManager(
                     put("type", "responses")
                     put("responses", JSONObject().apply {
                         put("model", backModel)
-                        put("instructions", "$timeContext\n\n${settings.backendSystemInstructions}")
+                        put("instructions", "$timeContext\n\n${settings.backendSystemInstructions}$glossaryBlock")
                         if (toolsArr.length() > 0) {
                             put("tools", toolsArr)
                             put("tool_choice", "auto")
@@ -373,6 +445,7 @@ class LiveSessionManager(
         useSpeakerphone: Boolean,
         conversationSnapshotProvider: () -> List<ChatMessage>
     ) {
+        val promptInterpreter = isPromptAwareInterpreterMode(activeSettings)
         when (event.optString("type")) {
             "session.started" -> {
                 sessionStarted = true
@@ -381,11 +454,17 @@ class LiveSessionManager(
                 if (remoteId.isNotBlank()) {
                     listener.onRemoteSessionIdResolved(remoteId)
                 }
-                audioEngine?.start(useSpeakerphone = useSpeakerphone)
-                listener.onConnectionStateChanged(
-                    ConnectionState.LIVE,
-                    "通話中：${settings.frontendVoiceModel} ⇄ ${settings.backendBrainModel}"
+                audioEngine?.start(
+                    useSpeakerphone = useSpeakerphone,
+                    isSimultaneousTranslation = promptInterpreter
                 )
+                val statusMsg = if (promptInterpreter) {
+                    val langLabel = AppSettings.languageLabel(activeSettings.translationTargetLanguage)
+                    "🌐 智慧詞庫口譯中：自動偵測語言 ➔ $langLabel"
+                } else {
+                    "通話中：${settings.frontendVoiceModel} ⇄ ${settings.backendBrainModel}"
+                }
+                listener.onConnectionStateChanged(ConnectionState.LIVE, statusMsg)
             }
 
             "session.output_audio.delta" -> {
@@ -399,8 +478,8 @@ class LiveSessionManager(
                 val rawDelta = event.optString("delta", "")
                 val startMs = event.optLong("start_ms", 0L)
                 if (rawDelta.isNotEmpty()) {
-                    // Convert Simplified Chinese ASR output to Traditional Chinese immediately
-                    val delta = TraditionalChineseConverter.toTraditional(rawDelta)
+                    val tradDelta = TraditionalChineseConverter.toTraditional(rawDelta, preserveJapanese = true)
+                    val delta = TraditionalChineseConverter.applyCustomGlossary(tradDelta, activeSettings.customGlossaryTerms)
                     val now = System.currentTimeMillis()
                     val silenceSinceVoice = if (lastVoiceDeltaWallMs > 0L) now - lastVoiceDeltaWallMs else 999_999L
                     val silenceSinceUser = if (lastUserDeltaWallMs > 0L) now - lastUserDeltaWallMs else 999_999L
@@ -434,7 +513,7 @@ class LiveSessionManager(
                         role = MessageRole.USER,
                         delta = formattedDelta,
                         timelineMs = startMs,
-                        modelTag = "User",
+                        modelTag = if (promptInterpreter) "🎙️ 原音辨識" else "User",
                         streamKey = streamKey,
                         turnIndex = turnIdx
                     )
@@ -445,7 +524,8 @@ class LiveSessionManager(
                 val rawDelta = event.optString("delta", "")
                 val startMs = event.optLong("start_ms", 0L)
                 if (rawDelta.isNotEmpty()) {
-                    val delta = TraditionalChineseConverter.toTraditional(rawDelta)
+                    val tradDelta = TraditionalChineseConverter.toTraditional(rawDelta, preserveJapanese = true)
+                    val delta = TraditionalChineseConverter.applyCustomGlossary(tradDelta, activeSettings.customGlossaryTerms)
                     val formattedDelta = if (needsVoiceParagraphBreak && voiceCharsInTurn > 0) {
                         needsVoiceParagraphBreak = false
                         "\n\n$delta"
@@ -461,11 +541,17 @@ class LiveSessionManager(
 
                     val turnIdx = currentTurnIndex
                     val streamKey = "turn_${sessionEpochId}_${turnIdx}_voice"
+                    val tag = if (promptInterpreter) {
+                        val langShort = AppSettings.languageLabel(activeSettings.translationTargetLanguage).substringBefore(" (")
+                        "🌐 詞庫口譯 ➔ $langShort"
+                    } else {
+                        settings.frontendVoiceModel
+                    }
                     listener.onTranscriptDelta(
                         role = MessageRole.ASSISTANT_VOICE,
                         delta = formattedDelta,
                         timelineMs = startMs,
-                        modelTag = settings.frontendVoiceModel,
+                        modelTag = tag,
                         streamKey = streamKey,
                         turnIndex = turnIdx
                     )
@@ -840,16 +926,34 @@ class LiveSessionManager(
         val cleanLang = newLanguageCode.trim().ifBlank { "zh" }
         activeSettings = activeSettings.copy(translationTargetLanguage = cleanLang)
         val ws = webSocket
-        if (ws != null && sessionStarted && activeProtocol == LiveProtocol.OPENAI_TRANSLATE && !isClosing) {
-            if (userCharsInTurn > 0 || voiceCharsInTurn > 0) {
-                advanceToNextTurn()
-            }
-            sendTranslationSessionUpdate(ws, cleanLang)
+        if (ws != null && sessionStarted && !isClosing) {
             val langLabel = AppSettings.languageLabel(cleanLang)
-            listener.onConnectionStateChanged(
-                ConnectionState.LIVE,
-                "🌐 同步口譯中：自動偵測 70+ 語言 ➔ $langLabel"
-            )
+            if (activeProtocol == LiveProtocol.OPENAI_TRANSLATE) {
+                if (userCharsInTurn > 0 || voiceCharsInTurn > 0) {
+                    advanceToNextTurn()
+                }
+                sendTranslationSessionUpdate(ws, cleanLang)
+                listener.onConnectionStateChanged(
+                    ConnectionState.LIVE,
+                    "🌐 同步口譯中：自動偵測 70+ 語言 ➔ $langLabel"
+                )
+            } else if (isPromptAwareInterpreterMode(activeSettings) && activeProtocol == LiveProtocol.OPENAI_LIVE) {
+                if (userCharsInTurn > 0 || voiceCharsInTurn > 0) {
+                    advanceToNextTurn()
+                }
+                runCatching {
+                    ws.send(JSONObject().apply {
+                        put("type", "session.thinking.append")
+                        put("event_id", "lang_switch_${UUID.randomUUID().toString().take(8)}")
+                        put("delegation_id", JSONObject.NULL)
+                        put("content", "[系統口譯方向切換] 從現在起，請將使用者說的所有語音立即口譯為目標語言：【$langLabel】。只輸出翻譯後的語音，不要回答問題。")
+                    }.toString())
+                }
+                listener.onConnectionStateChanged(
+                    ConnectionState.LIVE,
+                    "🌐 智慧詞庫口譯中：自動偵測語言 ➔ $langLabel"
+                )
+            }
         }
     }
 
@@ -875,7 +979,8 @@ class LiveSessionManager(
                     if (userCharsInTurn >= 24 && silenceSinceUser > 2800L) {
                         advanceToNextTurn()
                     }
-                    val delta = TraditionalChineseConverter.toTraditional(rawDelta, preserveJapanese = true)
+                    val tradDelta = TraditionalChineseConverter.toTraditional(rawDelta, preserveJapanese = true)
+                    val delta = TraditionalChineseConverter.applyCustomGlossary(tradDelta, activeSettings.customGlossaryTerms)
                     lastUserDeltaWallMs = now
                     userCharsInTurn += delta.length
                     val turnIdx = currentTurnIndex
@@ -899,11 +1004,12 @@ class LiveSessionManager(
                         advanceToNextTurn()
                     }
                     val targetLang = activeSettings.translationTargetLanguage
-                    val delta = if (targetLang == "zh") {
+                    val tradDelta = if (targetLang == "zh") {
                         TraditionalChineseConverter.toTraditional(rawDelta, preserveJapanese = false)
                     } else {
                         rawDelta
                     }
+                    val delta = TraditionalChineseConverter.applyCustomGlossary(tradDelta, activeSettings.customGlossaryTerms)
                     lastVoiceDeltaWallMs = now
                     voiceCharsInTurn += delta.length
                     val turnIdx = currentTurnIndex

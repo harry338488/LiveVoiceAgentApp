@@ -264,7 +264,8 @@ fun MainScreen(
                     isTranslationMode = isTranslationMode,
                     onSelectTranslationMode = { viewModel.setTranslationMode(it) },
                     onSelectTargetLanguage = { viewModel.setTranslationTargetLanguage(it) },
-                    onSwapTranslationLanguages = { viewModel.swapTranslationLanguages() },
+                    onSelectSecondaryLanguage = { viewModel.setTranslationSecondaryLanguage(it) },
+                    onUpdateSettings = { viewModel.updateSettings(it) },
                     onToggleCall = onRequestMicPermissionAndToggleCall,
                     onToggleMute = { viewModel.toggleMute() },
                     onToggleSpeaker = { viewModel.toggleSpeakerphone() },
@@ -302,7 +303,8 @@ private fun LiveConversationTab(
     isTranslationMode: Boolean,
     onSelectTranslationMode: (Boolean) -> Unit,
     onSelectTargetLanguage: (String) -> Unit,
-    onSwapTranslationLanguages: () -> Unit,
+    onSelectSecondaryLanguage: (String) -> Unit,
+    onUpdateSettings: (AppSettings) -> Unit,
     onToggleCall: () -> Unit,
     onToggleMute: () -> Unit,
     onToggleSpeaker: () -> Unit,
@@ -328,17 +330,17 @@ private fun LiveConversationTab(
             onSelectTranslationMode = onSelectTranslationMode
         )
 
-        // 2. If in Translation Mode, show the sleek Language Bar & A ⇄ B Quick Swap
+        // 2. If in Translation Mode, show the sleek, human-friendly Output Language Console & Glossary/Prompt button
         AnimatedVisibility(
             visible = isTranslationMode,
             enter = expandVertically() + fadeIn(),
             exit = shrinkVertically() + fadeOut()
         ) {
             TranslationLanguageControlBar(
-                targetLang = uiState.settings.translationTargetLanguage,
-                secondaryLang = uiState.settings.translationSecondaryLanguage,
+                settings = uiState.settings,
                 onSelectTargetLanguage = onSelectTargetLanguage,
-                onSwapLanguages = onSwapTranslationLanguages
+                onSelectSecondaryLanguage = onSelectSecondaryLanguage,
+                onUpdateSettings = onUpdateSettings
             )
         }
 
@@ -518,62 +520,100 @@ private fun ModeSegmentedSwitcher(
 
 @Composable
 private fun TranslationLanguageControlBar(
-    targetLang: String,
-    secondaryLang: String,
+    settings: AppSettings,
     onSelectTargetLanguage: (String) -> Unit,
-    onSwapLanguages: () -> Unit
+    onSelectSecondaryLanguage: (String) -> Unit,
+    onUpdateSettings: (AppSettings) -> Unit
 ) {
+    val targetLang = settings.translationTargetLanguage
+    val secondaryLang = settings.translationSecondaryLanguage
+
+    // Keep two fixed-position quick slots (Slot A on the left, Slot B on the right) so buttons NEVER jump around!
+    var slotALang by remember {
+        mutableStateOf(if (targetLang.isNotBlank()) targetLang else "zh")
+    }
+    var slotBLang by remember {
+        mutableStateOf(
+            if (secondaryLang.isNotBlank() && secondaryLang != slotALang) secondaryLang
+            else if (slotALang == "zh") "ja" else "zh"
+        )
+    }
+
+    // If user selected a 3rd language from the 13-language bar, update whichever slot wasn't Chinese (or Slot B)
+    LaunchedEffect(targetLang) {
+        if (targetLang != slotALang && targetLang != slotBLang) {
+            slotBLang = targetLang
+            onSelectSecondaryLanguage(targetLang)
+        }
+    }
+
+    var showSlotAMenu by remember { mutableStateOf(false) }
+    var showSlotBMenu by remember { mutableStateOf(false) }
+    var showAll13Langs by remember { mutableStateOf(false) }
+    var showGlossaryDialog by remember { mutableStateOf(false) }
+
     val chipScroll = rememberScrollState()
-    val targetLabel = AppSettings.languageLabel(targetLang).substringBefore(" (")
-    val secondaryLabel = AppSettings.languageLabel(secondaryLang).substringBefore(" (")
+    val hasCustomGlossaryOrPrompt =
+        settings.customGlossaryTerms.isNotBlank() ||
+                settings.translationContextPrompt.isNotBlank() ||
+                settings.usePromptAwareInterpreter
+
+    val activeOutputShort = AppSettings.languageLabel(targetLang).substringBefore(" (")
 
     Surface(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 14.dp, vertical = 4.dp),
-        shape = RoundedCornerShape(16.dp),
-        color = Color(0xFF0F222D).copy(alpha = 0.85f),
-        border = BorderStroke(1.dp, EmeraldAccent.copy(alpha = 0.35f))
+        shape = RoundedCornerShape(18.dp),
+        color = Color(0xFF0F222D).copy(alpha = 0.92f),
+        border = BorderStroke(1.dp, EmeraldAccent.copy(alpha = 0.4f))
     ) {
         Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+            // 1. Top Row: Clear explanation that INPUT language is ALWAYS auto-detected + Glossary/Prompt Button
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(modifier = Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "🎙️ 說話語言：不限 (自動聽懂 70+ 國語言)",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(2.dp))
                     Text(
-                        text = "🌐 目標口譯輸出語言：$targetLabel",
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = EmeraldAccent
-                    )
-                    Text(
-                        text = "自動偵測 70+ 國輸入語言 • 保留原說話者音色語氣",
+                        text = "無須設定輸入語言！下方只需點選「手機要翻成哪國話播出來」",
                         style = MaterialTheme.typography.labelSmall,
                         color = Color(0xFF94A3B8)
                     )
                 }
 
-                // A ⇄ B Quick Swap Pill for Two-Way Face-to-Face Interpretation
+                // Custom Glossary & Prompt Button
                 Surface(
                     shape = RoundedCornerShape(50),
-                    color = EmeraldAccent.copy(alpha = 0.18f),
-                    border = BorderStroke(1.dp, EmeraldAccent.copy(alpha = 0.55f)),
-                    modifier = Modifier.clickable { onSwapLanguages() }
+                    color = if (hasCustomGlossaryOrPrompt) VioletAccent.copy(alpha = 0.25f) else Color(0xFF1E293B),
+                    border = BorderStroke(
+                        1.dp,
+                        if (hasCustomGlossaryOrPrompt) VioletAccent else Color.White.copy(alpha = 0.18f)
+                    ),
+                    modifier = Modifier.clickable { showGlossaryDialog = true }
                 ) {
                     Row(
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Icon(
-                            imageVector = Icons.Default.SwapHoriz,
-                            contentDescription = "雙向語言切換",
-                            tint = EmeraldAccent,
-                            modifier = Modifier.size(16.dp)
+                            imageVector = Icons.Default.AutoAwesome,
+                            contentDescription = "專屬詞庫與提示詞",
+                            tint = if (hasCustomGlossaryOrPrompt) Color(0xFFD8B4FE) else CyanAccent,
+                            modifier = Modifier.size(14.dp)
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = "$targetLabel ⇄ $secondaryLabel",
+                            text = if (hasCustomGlossaryOrPrompt) "詞庫/Prompt (已啟用)" else "詞庫 / Prompt",
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.Bold,
                             color = Color.White
@@ -582,39 +622,401 @@ private fun TranslationLanguageControlBar(
                 }
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
-            // Horizontal Scrollable 13 Target Languages
+            // 2. Middle Row: Two Fixed-Position Output Target Buttons (Slot A & Slot B never swap places!)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Fixed Slot A (Left Button)
+                val isSlotAActive = targetLang == slotALang
+                val slotALabel = AppSettings.languageLabel(slotALang).substringBefore(" (")
+                Box(modifier = Modifier.weight(1f)) {
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = if (isSlotAActive) EmeraldAccent.copy(alpha = 0.22f) else Color(0xFF162235),
+                        border = BorderStroke(
+                            width = if (isSlotAActive) 1.5.dp else 1.dp,
+                            color = if (isSlotAActive) EmeraldAccent else Color.White.copy(alpha = 0.1f)
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                onSelectTargetLanguage(slotALang)
+                                onSelectSecondaryLanguage(slotBLang)
+                            }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = if (isSlotAActive) "🔊 正在翻成此語言" else "點擊切換輸出 1",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (isSlotAActive) EmeraldAccent else Color(0xFF94A3B8),
+                                    fontWeight = if (isSlotAActive) FontWeight.Bold else FontWeight.Normal
+                                )
+                                Text(
+                                    text = slotALabel,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = Color.White,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = Color.White.copy(alpha = 0.08f),
+                                modifier = Modifier.clickable { showSlotAMenu = true }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "換語言",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color(0xFFCBD5E1)
+                                    )
+                                    Icon(
+                                        imageVector = Icons.Default.ArrowDropDown,
+                                        contentDescription = "更換常用語言 1",
+                                        tint = Color(0xFFCBD5E1),
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    DropdownMenu(
+                        expanded = showSlotAMenu,
+                        onDismissRequest = { showSlotAMenu = false }
+                    ) {
+                        AppSettings.AVAILABLE_TRANSLATION_LANGUAGES.forEach { (code, fullLabel) ->
+                            DropdownMenuItem(
+                                text = { Text(fullLabel) },
+                                onClick = {
+                                    slotALang = code
+                                    onSelectTargetLanguage(code)
+                                    showSlotAMenu = false
+                                }
+                            )
+                        }
+                    }
+                }
+
+                // Fixed Slot B (Right Button)
+                val isSlotBActive = targetLang == slotBLang
+                val slotBLabel = AppSettings.languageLabel(slotBLang).substringBefore(" (")
+                Box(modifier = Modifier.weight(1f)) {
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = if (isSlotBActive) EmeraldAccent.copy(alpha = 0.22f) else Color(0xFF162235),
+                        border = BorderStroke(
+                            width = if (isSlotBActive) 1.5.dp else 1.dp,
+                            color = if (isSlotBActive) EmeraldAccent else Color.White.copy(alpha = 0.1f)
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                onSelectTargetLanguage(slotBLang)
+                                onSelectSecondaryLanguage(slotALang)
+                            }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = if (isSlotBActive) "🔊 正在翻成此語言" else "點擊切換輸出 2",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (isSlotBActive) EmeraldAccent else Color(0xFF94A3B8),
+                                    fontWeight = if (isSlotBActive) FontWeight.Bold else FontWeight.Normal
+                                )
+                                Text(
+                                    text = slotBLabel,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = Color.White,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = Color.White.copy(alpha = 0.08f),
+                                modifier = Modifier.clickable { showSlotBMenu = true }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "換語言",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color(0xFFCBD5E1)
+                                    )
+                                    Icon(
+                                        imageVector = Icons.Default.ArrowDropDown,
+                                        contentDescription = "更換常用語言 2",
+                                        tint = Color(0xFFCBD5E1),
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    DropdownMenu(
+                        expanded = showSlotBMenu,
+                        onDismissRequest = { showSlotBMenu = false }
+                    ) {
+                        AppSettings.AVAILABLE_TRANSLATION_LANGUAGES.forEach { (code, fullLabel) ->
+                            DropdownMenuItem(
+                                text = { Text(fullLabel) },
+                                onClick = {
+                                    slotBLang = code
+                                    onSelectTargetLanguage(code)
+                                    onSelectSecondaryLanguage(slotALang)
+                                    showSlotBMenu = false
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // 3. Bottom Row: Status Summary + Toggle for all 13 output languages
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .horizontalScroll(chipScroll),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    .clickable { showAll13Langs = !showAll13Langs }
+                    .padding(vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                AppSettings.AVAILABLE_TRANSLATION_LANGUAGES.forEach { (code, fullLabel) ->
-                    val isSelected = code == targetLang
-                    val shortLabel = fullLabel.substringBefore(" (")
-                    Surface(
-                        shape = RoundedCornerShape(50),
-                        color = if (isSelected) EmeraldAccent else Color(0xFF1E293B).copy(alpha = 0.75f),
-                        border = BorderStroke(
-                            1.dp,
-                            if (isSelected) EmeraldAccent else Color.White.copy(alpha = 0.1f)
-                        ),
-                        modifier = Modifier.clickable { onSelectTargetLanguage(code) }
-                    ) {
-                        Text(
-                            text = shortLabel,
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                            color = if (isSelected) Color(0xFF042F2E) else Color(0xFFE2E8F0),
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
-                        )
+                Text(
+                    text = "✅ 目前手機會將聽到的任何話翻成：【$activeOutputShort】",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = EmeraldAccent,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = if (showAll13Langs) "收合 13 國清單" else "更多語言 (13國)",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFF94A3B8)
+                    )
+                    Icon(
+                        imageVector = if (showAll13Langs) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                        contentDescription = null,
+                        tint = Color(0xFF94A3B8),
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
+
+            AnimatedVisibility(visible = showAll13Langs) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 6.dp)
+                        .horizontalScroll(chipScroll),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    AppSettings.AVAILABLE_TRANSLATION_LANGUAGES.forEach { (code, fullLabel) ->
+                        val isSelected = code == targetLang
+                        val shortLabel = fullLabel.substringBefore(" (")
+                        Surface(
+                            shape = RoundedCornerShape(50),
+                            color = if (isSelected) EmeraldAccent else Color(0xFF1E293B).copy(alpha = 0.75f),
+                            border = BorderStroke(
+                                1.dp,
+                                if (isSelected) EmeraldAccent else Color.White.copy(alpha = 0.1f)
+                            ),
+                            modifier = Modifier.clickable {
+                                if (code != slotALang && code != slotBLang) {
+                                    slotBLang = code
+                                }
+                                onSelectTargetLanguage(code)
+                            }
+                        ) {
+                            Text(
+                                text = shortLabel,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                color = if (isSelected) Color(0xFF042F2E) else Color(0xFFE2E8F0),
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                            )
+                        }
                     }
                 }
             }
         }
     }
+
+    if (showGlossaryDialog) {
+        CustomGlossaryAndPromptDialog(
+            settings = settings,
+            onDismiss = { showGlossaryDialog = false },
+            onSave = { newGlossary, newContextPrompt, usePromptInterpreter ->
+                onUpdateSettings(
+                    settings.copy(
+                        customGlossaryTerms = newGlossary,
+                        translationContextPrompt = newContextPrompt,
+                        usePromptAwareInterpreter = usePromptInterpreter
+                    )
+                )
+                showGlossaryDialog = false
+            }
+        )
+    }
+}
+
+@Composable
+private fun CustomGlossaryAndPromptDialog(
+    settings: AppSettings,
+    onDismiss: () -> Unit,
+    onSave: (String, String, Boolean) -> Unit
+) {
+    var glossaryText by remember { mutableStateOf(settings.customGlossaryTerms) }
+    var contextPromptText by remember { mutableStateOf(settings.translationContextPrompt) }
+    var usePromptInterpreter by remember { mutableStateOf(settings.usePromptAwareInterpreter) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xFF111827),
+        titleContentColor = Color.White,
+        textContentColor = Color(0xFFE2E8F0),
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.AutoAwesome,
+                    contentDescription = null,
+                    tint = CyanAccent,
+                    modifier = Modifier.size(22.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "口譯與語音專屬詞彙庫 ＆ Prompt",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color(0xFF1E293B).copy(alpha = 0.7f),
+                    border = BorderStroke(1.dp, CyanAccent.copy(alpha = 0.3f))
+                ) {
+                    Text(
+                        text = "💡 說明：OpenAI 官方為防止語音注入攻擊，限制 `gpt-realtime-translate` 端點不可接收 System Prompt，但本 App 支援：\n" +
+                                "1️⃣ 【即時字幕詞彙自動校正】：支援 `誤聽詞=正確詞` 在所有模式下即時替換字幕。\n" +
+                                "2️⃣ 【Prompt 智慧詞庫口譯模式】：開啟下方開關後，將改由 `gpt-live-1` 擔任口譯官，連同語音發音都能 100% 讀懂你的專有名詞與領域背景！",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFFCBD5E1),
+                        modifier = Modifier.padding(10.dp)
+                    )
+                }
+
+                OutlinedTextField(
+                    value = glossaryText,
+                    onValueChange = { glossaryText = it },
+                    label = { Text("📚 常用專有名詞 / 諧音校正表") },
+                    placeholder = {
+                        Text("範例：\nTSMC 台積電, CoWoS, 初音未來\n雷姆=蕾姆\n科沃斯=CoWoS\n林克阿普=Linkup")
+                    },
+                    minLines = 3,
+                    maxLines = 6,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                OutlinedTextField(
+                    value = contextPromptText,
+                    onValueChange = { contextPromptText = it },
+                    label = { Text("🎯 口譯領域背景與風格提示詞 (Prompt)") },
+                    placeholder = {
+                        Text("範例：這是一場日本動漫／半導體技術交流，遇到日文角色名與英文技術縮寫請保留原意...")
+                    },
+                    minLines = 2,
+                    maxLines = 4,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = if (usePromptInterpreter) VioletAccent.copy(alpha = 0.18f) else Color(0xFF162032),
+                    border = BorderStroke(
+                        1.dp,
+                        if (usePromptInterpreter) VioletAccent else Color.White.copy(alpha = 0.1f)
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { usePromptInterpreter = !usePromptInterpreter }
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "啟用 Prompt 智慧詞庫口譯官 (gpt-live-1)",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                            Text(
+                                text = if (usePromptInterpreter) {
+                                    "已開啟：語音輸出本身也會嚴格遵循上方 Prompt 與專有名詞庫（適合專有名詞較多的場合）"
+                                } else {
+                                    "關閉中（預設）：使用 gpt-realtime-translate 極速邊講邊翻，詞彙表用於即時字幕修正"
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFF94A3B8)
+                            )
+                        }
+                        Switch(
+                            checked = usePromptInterpreter,
+                            onCheckedChange = { usePromptInterpreter = it }
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    onSave(glossaryText.trim(), contextPromptText.trim(), usePromptInterpreter)
+                },
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = EmeraldAccent,
+                    contentColor = Color(0xFF042F2E)
+                )
+            ) {
+                Text("儲存套用", fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消", color = Color(0xFF94A3B8))
+            }
+        }
+    )
 }
 
 @Composable

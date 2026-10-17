@@ -51,6 +51,9 @@ class ConversationRepository(private val context: Context) {
             calendarToolsEnabled = prefs.getBoolean("calendarToolsEnabled", true),
             translationTargetLanguage = prefs.getString("translationTargetLanguage", "zh") ?: "zh",
             translationSecondaryLanguage = prefs.getString("translationSecondaryLanguage", "ja") ?: "ja",
+            customGlossaryTerms = prefs.getString("customGlossaryTerms", "") ?: "",
+            translationContextPrompt = prefs.getString("translationContextPrompt", "") ?: "",
+            usePromptAwareInterpreter = prefs.getBoolean("usePromptAwareInterpreter", false),
             voiceSystemInstructions = prefs.getString(
                 "voiceSystemInstructions",
                 AppSettings.DEFAULT_FRONTEND_VOICE_PROMPT
@@ -82,6 +85,9 @@ class ConversationRepository(private val context: Context) {
             putBoolean("calendarToolsEnabled", settings.calendarToolsEnabled)
             putString("translationTargetLanguage", settings.translationTargetLanguage.trim())
             putString("translationSecondaryLanguage", settings.translationSecondaryLanguage.trim())
+            putString("customGlossaryTerms", settings.customGlossaryTerms)
+            putString("translationContextPrompt", settings.translationContextPrompt)
+            putBoolean("usePromptAwareInterpreter", settings.usePromptAwareInterpreter)
             putString("voiceSystemInstructions", settings.voiceSystemInstructions)
             putString("backendSystemInstructions", settings.backendSystemInstructions)
             putString("fetchedVoiceModels", settings.fetchedVoiceModels.distinct().joinToString(","))
