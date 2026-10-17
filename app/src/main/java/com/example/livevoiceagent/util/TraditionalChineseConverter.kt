@@ -27,6 +27,14 @@ object TraditionalChineseConverter {
     private const val TRADITIONAL_CHARS =
         "萬與專業叢東絲丟兩嚴喪個豐臨為麗舉麼義烏樂喬習鄉書買亂爭於虧雲亙亞產畝親褻億僅從侖倉儀們價眾優夥會傴傘偉傳傷倫偽佇體餘傭僉俠侶僥偵側僑儈儕儂俁儔儼倆儷儉債傾傪僂僨償儻儐儲儺兒兌兗黨蘭關興茲養獸囅內岡冊寫軍農塚沖決況凍淨凄涼凌減湊凜幾鳳鳧憑凱擊氹鑿芻劃劉則剛創刪別剗剄劊劌剴劑剮劍剝劇勸辦務勱動勵勁勞勢勳猛勩勻匭匱區醫華協單賣盧鹵臥衛卻巹廠廳歷厲壓厭厙廁廂厴廈廚廄廝縣參靉靆雙發變敘疊葉號嘆嘰籲後嚇呂嗎唚噸聽啟吳嘸囈嘔嚦唄員咼嗆嗚詠咔嚨嚀噝吒噅鹹哌響啞噠嘵嗶噦嘩噲嚌噥喲嘜啹嘮啢嗩唕喚呼嘖嗇囀嚙囉啴嘯噴嘍嚳囁呵噯噓嚶囑嚕囂團園囪圍圇國圖圓聖壙場坂壞塊堅壇壢壩塢墳墜壟壟壚壘墾坰堊墊埡墶壋塏堖塒塤堝堷塹墮灣牆壯聲殼壺處備復夠頭誇夾奪奩奐奮獎奧妝婦媽嫵嫗媯姍姜婁婭嬈嬌孌娛媧嫻嫿嬰嬋嬸媼嬡嬪嬙嬤孫學孿寧寶實寵審憲宮寬賓寢對尋導壽將爾塵嘗堯尷屍盡層屓屜屆屬屢屨嶼歲豈嶇崗峴嶴嵐島巖嶺岳崠巋嶨嶧峽嶢嶠崢巒嶗崍嶮嶄嶸嶔崳嶁脊巔鞏巰幣帥師幃帳簾幟帶幀幫幬幘幗冪幹並廣莊慶廬廡庫應廟龐廢廎廩開異棄弒鞏張彌弳彎彈強歸當錄彥徹徑徠御憶懺憂愾懷態慫憮慪悵愴憐總懟懌戀懇惡慟懨愷惻惱惲悅愨懸慳憫驚懼慘懲憊愜慚憚慣惰惱想惶惹惺愀愆愈愉愍意愕愚感慍愣憤憒愧願慈慊慌慎懾慕慝慢慧慨慫慮慰慳懾慶憂怵憎憐憑懍懈應懊懋懣懶懍戲成戰戩戶扎撲扦執擴捫掃揚擾撫拋摶摳掄搶護報擔擬攏揀擁攔擰撥擇掛摯攣掗撾撻挾撓擋撟掙擠揮撏撈損撿換搗據捻擄摑擲撣摻摜攬撳攙擱摟攪攜攝攄擺搖擯攤攖撐攆擷擼攛擻攢敵斂數齋斕斗斬斷無舊時曠暘曇晝曨顯晉曬曉曄暈暉暫曖札術樸機殺雜權條來楊榪傑極構樅樞棗櫪梘棖槍楓梟櫃檸檉梔柵標棧櫛櫳棟櫨櫟欄樹棲樣欒棬椏橈楨檔桤橋樺檜槳樁夢檮棶檢欞槨櫝槧欏橢樓欖櫬櫚櫸檻檳櫧橫檣櫻櫫櫥櫓櫞檁歡歟歐殲歿殤殘殞殮殫殯毆毀轂畢斃氈毿氌氣氫氬氳匯漢污湯洶沓溝沒灃漚瀝淪滄溈滬濘淚澩瀧瀘濼瀉潑澤涇潔灑窪浹淺漿澆湞濁測澮濟瀏滻渾滸濃潯濤澇淶漣潿渦渙滌潤澗漲澀淵淥漬瀆漸澠漁瀋滲溫游灣濕潰濺漵潷滾滯灩灄滿瀅濾濫灤濱灘澦漓漠滠滅燈靈災燦煬爐燉煒熗點煉熾爍爛烴燭煙煩燒燁燴燙燼熱煥燜燾煆糊溜愛爺牘犛牽犧犢犾狀獷獁猶狽麅獮獰獨狹獅獪猙獄猻獫獵獼玀豬貓蝟獻獺璣璵瑒瑪瑋環現瑲璽珉玨琺瓏璫琿璡璉瑣瓊瑤璦璇瓔瓚甕電畫暢畬疇癤療瘧癘瘍癧瘡瘋皰痾癰痙癢瘂癆瘓癇痴癉瘮瘞瘻癟癱癮癭癩癬癲皚皺皸盞鹽監蓋盜盤瞘眥矓著睜睞瞼瞞矚矯磯礬礦碭碼磚硨硯碸礪礱礫礎硜硅碩硤磽磑礄確鹼礙磧磣鹼禮禕禰禎禱禍稟祿禪離禿稈種積稱穢穠穭稅穌穩穡窮竊竅窵窯竄窩窺竇窶豎競篤筍筆筧箋籠籩築篳篩簹箏籌簽簡籙簀篋籜籮簞簫簣簍籃籬籪籟糴類秈糶糲粵糞糧糝餼緊縶糸糾紆紅紂纖紇約級紈纊紀紉緯紜紘純紕紗綱納紝縱綸紛紙紋紡紵紖紐紓線紺紲紱練組紳細織終縐絆紼絀紹繹經紿綁絨結絝繞絰絎繪給絢絳絡絕絞統綆綃絹繡紿綏絛繼綈績緒綾緓續綺緋綽緔緄繩維綿綬繃綢綯綹綣綜綻綰綠綴緇緙緗緘緬纜緹緲緝縕繢緦綞緞緶線緱縋緩締縷編緡緣縉縛縟縝縫縗縞纏縭縊縑繽縹縵縲纓縮繆繅纈繚繕繒韁繾繰繯繳纘罌網羅罰罷羆羈羥羨翹翽翬耮耬聳恥聶聾職聹聯聵聰肅腸膚骯腎腫脹脅胂胃膽背胎胖胚勝胞胡胤胥朧腖臚脛胬胭胯胰胱胲胳胴膠胸胺胼能脂脆脈脊膾脎臟臍腦膿臠脖脘腳脛脞臘醃腓腔腕腥腮腰腱腴腹腺膩靦膃騰腿膀膂臏臆膻臀臂臃臊臣臧自臭至致臻臼輿舍舒舔鋪舜舞舟航般艦艙舳艫艱艷藝節羋薌蕪蘆蓯葦藶莧萇蒼苧蘇蘋莖蘢蔦塋煢繭荊薦荅莢蕘蓽蕎薈薺蕩榮葷滎犖熒蕁藎蓀蔭葒莇藥蒞蓧萊蓮蒔萵薟獲蕕瑩鶯蒓蘀蘿螢營縈蕭薩蔥蕆蕢蔣藍薊蘺蕷鎣驀薔蘞藺藹蘄蘊藪藁藉藍藏藐蘚藕藜藝藤藥藩藹藻藿蘧蘭蘆蘇蘊蘋蘑孽蟣虜慮虛蟲虯虍雖蝦蠆蝕蟻螞蠶蠔蜆蠱蠣蟶蠻蟄蛺蟯螄蠐蛻蝸蠟蠅蟈蟬蠍螻蠑蠀蟎蠨釁街衙衛衝表衫襯袞衰衲衷衽衾衿袁袂襖裊禕襠襲裝襠裼裴裸裹裒裔裕裘裙補裝裟裡裨裰裱裳裴裸裹製裾褂複褊褐褒褓褕褙褚褸褻襁襟襠見觀規覓視覘覽覺覬覡覿覦覯覲覷觴觸觶言訂訃認譏訐訌討讓訕訖訓議訊記講諱謳詎訝訥許訛論訩訟諷設訪訣證詁訶評詛識詗詐訴診詆謅詞詘詔詖譯詒誆誄試詿詩詰詼誠誅詵話誕詬詮詭詢詣諍該詳詫諢詡誡誣語誚誤誥誘誨誑說誦誒請諸諏諾讀諑誹課諉諛誰諗調諂諒諄誶談誼謀諶諜謊諫諧謔謁謂諤諭諼讒諮諳諺諦謎諞謨讜謖謝謠謗諡謙謐謹謾謫譾謬譚譖譙讕譜譎讞譴譫讖谷豆豈豎豐豚象豢豪豫豬豳貌貔貘貝貞負財貢貧貨販貪貫責貯貫貳賤賁貰貼貴貺貸貿費賀貽賊贄賈賄貲賃賂贓資賅贐賕賑賚賒賦賭齎贖賞賜贔賙賡賠賧賴賵贅賻賺賽賾贗贊贇贈贍贏贛赤赦赧走赳赴趙趕起趁超越趨趲躉躍蹌蹠躒踐蹺蹕躚跺躋跽踅踉踴躊踏踐行蹤蹦蹂蹄蹇蹈蹉蹊躡蹣蹙躥躪身躬軀車軋軌軒軔轉軛輪軟轟軲軻轤軸軹軼軤軫轢軺輕軾載輊轎輈輇輅較輒輔輛輦輩輝輥輞輬輟輜輳輻輯溫輸轡轅轄輾轆轍轔辭辟辯辮邊遼達遷過邁運還這進遠違連遲邇逕跡適選遜遞邐邏遺遙鄧鄺鄔郵鄒鄴鄰郁郤郟鄶鄭鄆酈鄖鄲醞醱醬釅釃釀釋裡重野量金鑑鑾鏨釔針釘釗釙釕釷釺釧釤釩釣鍆釹釵鈣鈈鈦鉅鈍鈔鐘鈉鋇鋼鈑鈐鑰欽鈞鎢鉤鈧鈁鈥鈄鈕鈀鈺錢鉦鉗鈷缽鈳鉕鈽鈸鉞鑽鉬鉭鉀鈿鈾鐵鉑鈴鑠鉛鉚鈰鉉鉈鉍鈮鈹鐸鉶銬銠鉺銪鋮鋏鋣鐃銍鐺銅鋁銱銦鎧鍘銖銑鋌銩銛鏵銓鎩鉿銚鉻銘錚銫鉸銥鏟銃鐋銨銀銣鑄鐒鋪鋙錸鋱鏈鏗銷鎖鋰鋥鋤鍋鋯鋨鏽銼鋝鋒鋅鍀鐦鐧銳銻鋃鋟鋦錒錆鍺鍩錯錨錛錡鍀錁錕錫錮鑼錘錐錦鍁錈鍃錇錟錠鍵鋸錳錙鍥鍈鍇鏘鍶鍔鍤鍬鍾鍛鎪鍠鍰鎄鍍鎂鏤錙鐨鎇鏌鎮鎛鎘鑷鐫鎳鎿鎦鎬鎊鎰鎵鐠鎔鏢鏜鏝鏍鏞鏡鏑鏃鏇鐔鐝鐐鏷鑥鐓鑭鐠鑹鏹鐙鑊鐳鐶鐲鐮鐿鑔鑣鑞鑲長門閂閃閆閉問闖閏闈閑閎間閔閌悶閘鬧閨聞闥閩閭闓閥閣閡閫鬮閱閬闍閾閹閶鬩閿閽閻閼闡闌闃闠闊闋闔闐闒闕闞隊陽陰陣階際陸隴陳陘陝隉隕險隨隱隸雋難雛讎靂霧霽霉靄靚靜靨韃鞽鞔鞘鞠鞣鞧韓韙韞韜韻頁頂頃頇項順須頊頑顧頓頎頒頌頏預顱領頗頸頡頰頋頜潁熲頦頤頻頮頹頷頴穎顆題顒顎顓顏額顳顢顛顙顥纇顫顬顰顴風颺颭颮颯颶颸颼颻飀飄飆飆飛食飧饗饜餐飢餳飩餼飪飫飭飯飲餞飾飽飼餶飴餌饒餉餄餎餃餏餅餑餖餓餘餒饃餜餛餡館餷饋餶餿饞饁饃餺餾饈饉饅饊饌饢馬馭馱馴馳驅馹駁驢駔駛駟駙駒騶駐駝駑駕驛駘驍罵駰驕驊駱駭駢驫驪騁驗騂駸駿騏騎騍騅騌驌驂騙騭騤騷騖驁騮騫騸驃騾驄驏驟驥驦驤骨骰骫骶骷骸骺骼髀髁髂騭髖髕髎髑髓體髕髖高髟髡髦髫髭髯髹髻鬃鬈鬏鬢鬟鬣鬯郁鬹魎魃魄魅魘魈魎魍魏魔魚魛魢魷魨魯魴魺鮁鮃鮎鱸鮋鮓鮒鮊鮑鱟鮍鲐鮭鮚鮳鮪鮞鮦鰂鮜鱠鱭鮫鮮鮺鯗鱘鯁鱺鰱鰹鯉鰣鰷鯀鯊鯇鮶鯽鯒鯖鯪鯕鯫鯡鯤鯧鯝鯢鯰鯛鯨鰺鯴鯔鱝鰈鰏鱨鯷鰮鰓鱷鰍鰒鰉鰁鱂鯿鰠鰲鰭鰨鰥鰩鰟鰜鰳鰾鱈鱉鰻鰵鏞鯥鰼鱖鱔鱗鱒鱯鱤鱧鱣鳤鳥鳩雞鳶鳴鳲鷗鴉鶬鴇鴆鴣鶇鸕鴨鴞鴦鴒鴟鴝鴛鴬鴕鷥鷙鴯鶧鵂鴴鵃鴿鸞鴻鵐鵓鸝鵑鵠鵝鵒鷳鵜鵡鵲鶓鵪鶤鵯鵬鵮鶉鶊鵷鷫鶘鶚鶻鶖鶿鶥騖鷊鷂鶲鶹鶺鷁鶼鶴鷖鸚鷓鷚鷯鷦鷲鷸鷺䴉鸇鷹鸌鹲鸛鸘鹵鹹鹺鹼鹽麗麥麩曲麴麻麼麾黃黌黑默黷黲黯黽鼉鼎鼐鼓鼗鼙鼠鼢鼬鼯鼷鼴鼻鼽鼾齁齊齏齒齔齟齡齙齠齜齦齬齪齲齷龍龔龕龜誌製諮隻裡係範鬆沒嚐嘗鬧麵準鐘別閒乾盡髒拚"
 
+    // Characters that are uniquely Japanese Shinjitai (not Simplified Chinese) or strong indicators of Japanese Kanji context
+    private const val JAPANESE_UNIQUE_KANJI =
+        "駅気図桜円広渋沢浜辺庁仏仮伝価児処労効勉勧勲単厳収咲営団囲圏圧増壊声売変奨嬢実宝対専届属帰廃応懐戦戯払抜択担拠挙挟捜掲揺摂撃撮数斉断旧昼暁条枠枢栄検楽様権欧歓歩歯歳歴残殴毎汚浄浅涙渇済渓減渡渦湾湿満溝滝滞潜潟瀬焼煙犠状狭独猟獣献畳疎療発県砕碁礼祢祷禅禍称稲穂穏窃窓竜粋粛経絵続総緑緒締編緩練縁縄縛縦縫縮績繊繋繍織繕繭繰缶罰罷聴職胆脱脳脹臓舗舘艶芸茎荘菓蔵薫薬藍虜蚕蛍蛮装裏視覚覧観触訳証誉読諸謙謹譲豊貰賛賜賞賢購贈践躍転軽輪輸辞込辿遅遥郷酔釈鉄鉱銭鋭鋳鋼録鍛鎌鎖鎮関閲闘険隠雑難霊静響頼頻顕顧飴餅餌駄駆騒験髄髪鯖鯛鰹鴎鴫鶏麺麿黒黙齢亀"
+
+    private val japaneseUniqueKanjiSet: Set<Char> by lazy {
+        JAPANESE_UNIQUE_KANJI.toHashSet()
+    }
+
     private val charMap: Map<Char, Char> by lazy {
         val map = HashMap<Char, Char>(SIMPLIFIED_CHARS.length)
         val len = minOf(SIMPLIFIED_CHARS.length, TRADITIONAL_CHARS.length)
@@ -36,15 +44,61 @@ object TraditionalChineseConverter {
         map
     }
 
-    fun toTraditional(text: String): String {
+    /**
+     * Returns true if [ch] is Japanese Hiragana, Katakana, Half-width Katakana, or Japanese-unique Kanji.
+     */
+    private fun isJapaneseIndicator(ch: Char): Boolean {
+        val code = ch.code
+        return (code in 0x3040..0x309F) || // Hiragana (ぁ-ん)
+                (code in 0x30A0..0x30FF) || // Katakana (ァ-ン)
+                (code in 0x31F0..0x31FF) || // Katakana Phonetic Extensions
+                (code in 0xFF66..0xFF9F) || // Half-width Katakana
+                japaneseUniqueKanjiSet.contains(ch)
+    }
+
+    // Split text into clauses by punctuation/whitespace so mixed "中文 + 日本語" sentences convert Chinese clauses
+    // while keeping Japanese clauses (containing Kana / Japanese Shinjitai) completely untouched.
+    private val clauseSplitRegex = Regex("(?<=[，。！？、；：,.!?;:\\s\\n])|(?=[，。！？、；：,.!?;:\\s\\n])")
+
+    /**
+     * Converts Simplified Chinese characters to Traditional Chinese while preserving:
+     * - English / Latin characters
+     * - Japanese Hiragana, Katakana, and Japanese Kanji in code-switched speech
+     */
+    fun toTraditional(text: String, preserveJapanese: Boolean = true): String {
         if (text.isEmpty()) return text
+        if (preserveJapanese) {
+            // If the entire snippet has Japanese indicators and is short (like a streaming delta), keep it intact
+            val hasJapanese = text.any { isJapaneseIndicator(it) }
+            if (hasJapanese) {
+                val clauses = text.split(clauseSplitRegex)
+                if (clauses.size <= 1) {
+                    // Single clause containing Japanese Kana/Shinjitai -> preserve Japanese Kanji & Kana as-is!
+                    return text
+                }
+                val out = StringBuilder(text.length)
+                for (clause in clauses) {
+                    if (clause.any { isJapaneseIndicator(it) }) {
+                        out.append(clause)
+                    } else {
+                        out.append(convertPureChineseClause(clause))
+                    }
+                }
+                return out.toString()
+            }
+        }
+        return convertPureChineseClause(text)
+    }
+
+    private fun convertPureChineseClause(clause: String): String {
+        if (clause.isEmpty()) return clause
         val transliterator = icuTransliterator
         if (transliterator != null) {
-            val res = runCatching { transliterator.transliterate(text) }.getOrNull()
+            val res = runCatching { transliterator.transliterate(clause) }.getOrNull()
             if (res != null) return res
         }
-        val sb = StringBuilder(text.length)
-        for (ch in text) {
+        val sb = StringBuilder(clause.length)
+        for (ch in clause) {
             sb.append(charMap[ch] ?: ch)
         }
         return sb.toString()

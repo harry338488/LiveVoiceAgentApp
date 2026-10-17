@@ -150,6 +150,67 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
         liveSessionManager.setSpeakerphone(newSpeaker)
     }
 
+    fun setTranslationMode(enabled: Boolean) {
+        val current = _uiState.value.settings
+        val wasConnected = _uiState.value.connectionState != ConnectionState.DISCONNECTED
+        val updated = if (enabled) {
+            current.copy(
+                protocol = LiveProtocol.OPENAI_TRANSLATE,
+                frontendVoiceModel = "gpt-realtime-translate"
+            )
+        } else {
+            val restoredVoiceModel = if (current.frontendVoiceModel.contains("translate")) {
+                "gpt-live-1"
+            } else {
+                current.frontendVoiceModel
+            }
+            val restoredProtocol = when {
+                restoredVoiceModel.lowercase().startsWith("grok") -> LiveProtocol.XAI_REALTIME
+                restoredVoiceModel.lowercase().startsWith("gpt-live") -> LiveProtocol.OPENAI_LIVE
+                else -> LiveProtocol.OPENAI_REALTIME
+            }
+            current.copy(
+                protocol = restoredProtocol,
+                frontendVoiceModel = restoredVoiceModel
+            )
+        }
+        updateSettings(updated)
+        if (wasConnected) {
+            liveSessionManager.disconnectImmediate()
+            startLiveCall()
+        } else {
+            val banner = if (enabled) {
+                "🌐 已切換至 gpt-realtime-translate 同步口譯模式（目標：${AppSettings.languageLabel(updated.translationTargetLanguage)}）"
+            } else {
+                "🎙️ 已切換至全雙工 AI 語音助理模式 (${updated.frontendVoiceModel} ⇄ ${updated.backendBrainModel})"
+            }
+            _uiState.update { it.copy(statusBanner = banner) }
+        }
+    }
+
+    fun setTranslationTargetLanguage(langCode: String) {
+        val updated = _uiState.value.settings.copy(translationTargetLanguage = langCode)
+        updateSettings(updated)
+        liveSessionManager.updateTranslationTargetLanguage(langCode)
+    }
+
+    fun setTranslationSecondaryLanguage(langCode: String) {
+        val updated = _uiState.value.settings.copy(translationSecondaryLanguage = langCode)
+        updateSettings(updated)
+    }
+
+    fun swapTranslationLanguages() {
+        val s = _uiState.value.settings
+        val newTarget = s.translationSecondaryLanguage
+        val newSecondary = s.translationTargetLanguage
+        val updated = s.copy(
+            translationTargetLanguage = newTarget,
+            translationSecondaryLanguage = newSecondary
+        )
+        updateSettings(updated)
+        liveSessionManager.updateTranslationTargetLanguage(newTarget)
+    }
+
     fun sendTypedMessage(text: String) {
         if (text.isBlank()) return
         val state = _uiState.value

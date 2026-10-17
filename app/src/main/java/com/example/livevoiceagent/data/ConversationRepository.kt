@@ -49,6 +49,8 @@ class ConversationRepository(private val context: Context) {
             linkupSearchDepth = prefs.getString("linkupSearchDepth", "standard") ?: "standard",
             openAiNativeSearchEnabled = prefs.getBoolean("openAiNativeSearchEnabled", false),
             calendarToolsEnabled = prefs.getBoolean("calendarToolsEnabled", true),
+            translationTargetLanguage = prefs.getString("translationTargetLanguage", "zh") ?: "zh",
+            translationSecondaryLanguage = prefs.getString("translationSecondaryLanguage", "ja") ?: "ja",
             voiceSystemInstructions = prefs.getString(
                 "voiceSystemInstructions",
                 AppSettings.DEFAULT_FRONTEND_VOICE_PROMPT
@@ -78,6 +80,8 @@ class ConversationRepository(private val context: Context) {
             putString("linkupSearchDepth", settings.linkupSearchDepth)
             putBoolean("openAiNativeSearchEnabled", settings.openAiNativeSearchEnabled)
             putBoolean("calendarToolsEnabled", settings.calendarToolsEnabled)
+            putString("translationTargetLanguage", settings.translationTargetLanguage.trim())
+            putString("translationSecondaryLanguage", settings.translationSecondaryLanguage.trim())
             putString("voiceSystemInstructions", settings.voiceSystemInstructions)
             putString("backendSystemInstructions", settings.backendSystemInstructions)
             putString("fetchedVoiceModels", settings.fetchedVoiceModels.distinct().joinToString(","))

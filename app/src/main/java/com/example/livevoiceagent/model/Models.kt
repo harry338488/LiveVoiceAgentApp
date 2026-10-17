@@ -7,6 +7,7 @@ import java.util.UUID
 enum class LiveProtocol(val label: String) {
     OPENAI_LIVE("OpenAI GPT-Live (/v1/live/sessions)"),
     OPENAI_REALTIME("OpenAI Realtime (/v1/realtime)"),
+    OPENAI_TRANSLATE("OpenAI 即時同步口譯 (/v1/realtime/translations)"),
     XAI_REALTIME("xAI Grok Voice (wss://api.x.ai/v1/realtime)")
 }
 
@@ -201,6 +202,8 @@ data class AppSettings(
     val linkupSearchDepth: String = "standard",
     val openAiNativeSearchEnabled: Boolean = false,
     val calendarToolsEnabled: Boolean = true,
+    val translationTargetLanguage: String = "zh",
+    val translationSecondaryLanguage: String = "ja",
     val voiceSystemInstructions: String = DEFAULT_FRONTEND_VOICE_PROMPT,
     val backendSystemInstructions: String = DEFAULT_BACKEND_BRAIN_PROMPT,
     val fetchedVoiceModels: List<String> = DEFAULT_VOICE_MODELS,
@@ -209,23 +212,24 @@ data class AppSettings(
     companion object {
         const val DEFAULT_FRONTEND_VOICE_PROMPT =
             """你是負責全雙工即時語音互動的前端語音助理（如 gpt-live-1）。
-1. 語言與風格：請一律使用自然、口語化的繁體中文與使用者交談，語氣親切、精煉，避免一次長篇大論唸出複雜的網址或代碼。
+1. 語言與風格：預設使用自然、口語化的台灣繁體中文與使用者交談；若使用者在語音中夾雜英文、日文（日本語）或其他語言，請自然理解並流暢應對（保留日文漢字與假名、英文專有名詞）。
 2. 任務委派原則：當使用者詢問需要最新網路資訊、深度推理、複雜任務整理，或是要求「查詢、新增、修改、刪除手機行事曆」時，請立即委派（Delegate）給後端模型處理。
 3. 播報方式：收到後端模型的處理結果後，請用簡潔好懂的口語告訴使用者核心結論與行動狀態（例如行事曆是否已成功新增/修改），並提醒使用者完整細節與參考連結已同步留存在畫面的對話紀錄中。"""
 
         const val DEFAULT_BACKEND_BRAIN_PROMPT =
             """你是負責深度推理、知識檢索、網路搜尋與手機行事曆管理的後端大腦模型（如 gpt-6-luna）。
-1. 語音對話協作：你正在支援一個即時語音助理。使用者的語音轉錄文字可能包含口語省略或同音字誤差，請結合上下文與最新查證的事實進行推理。
+1. 語音對話協作：你正在支援一個即時語音助理。使用者的語音可能夾雜中、英、日文等多國語言，請結合上下文與最新查證的事實進行推理。
 2. 工具使用規範：
    - 網路搜尋：當需要最新資訊、新聞、即時數據或查證事實時，請主動呼叫 `linkup_web_search`。
    - 手機行事曆：當使用者提到排程、提醒、會議、預約，或要求新增/更改/刪除行程時，請根據系統提供的「目前當地日期與時間」換算確切時間（yyyy-MM-dd HH:mm），並呼叫 `list_calendar_events`、`create_calendar_event`、`update_calendar_event` 或 `delete_calendar_event`。在修改或刪除行程前，若不確定 event_id，請先呼叫 `list_calendar_events` 查詢。
-3. 輸出結構：請使用繁體中文回傳清晰、條理分明的重點、數據與操作確認結果，這份輸出將同時提供給前端語音模型口語轉述，並直接保存在使用者的 App 對話筆記中供隨時查閱。"""
+3. 輸出結構：請使用繁體中文（專有名詞或日文內容保留原文漢字與假名）回傳清晰、條理分明的重點、數據與操作確認結果，這份輸出將同時提供給前端語音模型口語轉述，並直接保存在使用者的 App 對話筆記中供隨時查閱。"""
 
         val DEFAULT_VOICE_MODELS = listOf(
             "gpt-live-1",
             "gpt-live-1.1",
             "gpt-live-1-mini",
             "gpt-realtime-2.1",
+            "gpt-realtime-translate",
             "grok-voice-latest",
             "grok-voice-3.0"
         )
@@ -240,6 +244,26 @@ data class AppSettings(
             "grok-3-mini"
         )
 
+        val AVAILABLE_TRANSLATION_LANGUAGES = listOf(
+            "zh" to "🇹🇼 繁體中文 (Chinese)",
+            "ja" to "🇯🇵 日文 (Japanese)",
+            "en" to "🇺🇸 英文 (English)",
+            "ko" to "🇰🇷 韓文 (Korean)",
+            "es" to "🇪🇸 西班牙文 (Spanish)",
+            "fr" to "🇫🇷 法文 (French)",
+            "de" to "🇩🇪 德文 (German)",
+            "vi" to "🇻🇳 越南文 (Vietnamese)",
+            "id" to "🇮🇩 印尼文 (Indonesian)",
+            "pt" to "🇵🇹 葡萄牙文 (Portuguese)",
+            "it" to "🇮🇹 義大利文 (Italian)",
+            "ru" to "🇷🇺 俄文 (Russian)",
+            "hi" to "🇮🇳 印地文 (Hindi)"
+        )
+
+        fun languageLabel(code: String): String {
+            return AVAILABLE_TRANSLATION_LANGUAGES.firstOrNull { it.first == code }?.second ?: code
+        }
+
         val AVAILABLE_VOICES = listOf(
             "marin" to "Marin (GPT-Live 預設自然女聲)",
             "quartz" to "Quartz (澳洲清晰女聲)",
@@ -249,6 +273,9 @@ data class AppSettings(
             "stone" to "Stone (愛爾蘭男聲)",
             "gleam" to "Gleam (北美自然女聲)",
             "meridian" to "Meridian (北美自然男聲)",
+            "harema" to "Harema (日系自然女聲)",
+            "shida" to "Shida (日系自然男聲)",
+            "noeul" to "Noeul (韓系自然女聲)",
             "alloy" to "Alloy (經典中性聲線)",
             "shimmer" to "Shimmer (溫暖女聲)",
             "echo" to "Echo (清晰男聲)",

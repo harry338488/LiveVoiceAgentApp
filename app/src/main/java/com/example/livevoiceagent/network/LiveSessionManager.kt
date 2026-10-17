@@ -135,6 +135,8 @@ class LiveSessionManager(
 
         val frontModel = settings.frontendVoiceModel.trim().ifBlank { "gpt-live-1" }
         activeProtocol = when {
+            settings.protocol == LiveProtocol.OPENAI_TRANSLATE || frontModel.lowercase().contains("translate") ->
+                LiveProtocol.OPENAI_TRANSLATE
             frontModel.lowercase().startsWith("grok") || settings.protocol == LiveProtocol.XAI_REALTIME ->
                 LiveProtocol.XAI_REALTIME
             frontModel.lowercase().startsWith("gpt-live") || settings.protocol == LiveProtocol.OPENAI_LIVE ->
@@ -145,7 +147,7 @@ class LiveSessionManager(
 
         val apiKey = when (activeProtocol) {
             LiveProtocol.XAI_REALTIME -> settings.xAiApiKey.trim()
-            LiveProtocol.OPENAI_LIVE, LiveProtocol.OPENAI_REALTIME -> settings.openAiApiKey.trim()
+            LiveProtocol.OPENAI_LIVE, LiveProtocol.OPENAI_REALTIME, LiveProtocol.OPENAI_TRANSLATE -> settings.openAiApiKey.trim()
         }
 
         if (apiKey.isBlank()) {
@@ -157,14 +159,20 @@ class LiveSessionManager(
 
         val wsUrl = when (activeProtocol) {
             LiveProtocol.OPENAI_LIVE -> "wss://api.openai.com/v1/live/sessions"
+            LiveProtocol.OPENAI_TRANSLATE -> {
+                val translateModel = if (frontModel.lowercase().contains("translate")) frontModel else "gpt-realtime-translate"
+                "wss://api.openai.com/v1/realtime/translations?model=$translateModel"
+            }
             LiveProtocol.OPENAI_REALTIME -> "wss://api.openai.com/v1/realtime?model=$frontModel"
             LiveProtocol.XAI_REALTIME -> "wss://api.x.ai/v1/realtime?model=$frontModel"
         }
 
-        listener.onConnectionStateChanged(
-            ConnectionState.CONNECTING,
+        val connectingLabel = if (activeProtocol == LiveProtocol.OPENAI_TRANSLATE) {
+            "正在啟動 gpt-realtime-translate 同步口譯 (目標: ${AppSettings.languageLabel(settings.translationTargetLanguage)})..."
+        } else {
             "正在連線至 $frontModel (後端: ${settings.backendBrainModel})..."
-        )
+        }
+        listener.onConnectionStateChanged(ConnectionState.CONNECTING, connectingLabel)
 
         val requestBuilder = Request.Builder()
             .url(wsUrl)
@@ -192,6 +200,16 @@ class LiveSessionManager(
                     LiveProtocol.OPENAI_LIVE -> {
                         sendOpenAiLiveSessionStart(webSocket, settings, priorMessages)
                     }
+                    LiveProtocol.OPENAI_TRANSLATE -> {
+                        sendTranslationSessionUpdate(webSocket, settings.translationTargetLanguage)
+                        sessionStarted = true
+                        engine.start(useSpeakerphone = useSpeakerphone)
+                        val langLabel = AppSettings.languageLabel(settings.translationTargetLanguage)
+                        listener.onConnectionStateChanged(
+                            ConnectionState.LIVE,
+                            "🌐 同步口譯中：自動偵測 70+ 語言 ➔ $langLabel"
+                        )
+                    }
                     LiveProtocol.OPENAI_REALTIME, LiveProtocol.XAI_REALTIME -> {
                         sendRealtimeSessionUpdate(webSocket, settings)
                         sessionStarted = true
@@ -213,6 +231,9 @@ class LiveSessionManager(
                         settings = settings,
                         useSpeakerphone = useSpeakerphone,
                         conversationSnapshotProvider = conversationSnapshotProvider
+                    )
+                    LiveProtocol.OPENAI_TRANSLATE -> handleTranslationEvent(
+                        event = event
                     )
                     LiveProtocol.OPENAI_REALTIME, LiveProtocol.XAI_REALTIME -> handleRealtimeEvent(
                         webSocket = webSocket,
@@ -776,8 +797,7 @@ class LiveSessionManager(
                 put("output_audio_format", "pcm16")
                 put("input_audio_transcription", JSONObject().apply {
                     put("model", "whisper-1")
-                    put("language", "zh")
-                    put("prompt", "繁體中文，台灣正體字。")
+                    put("prompt", "繁體中文, English, 日本語")
                 })
                 put("turn_detection", JSONObject().apply {
                     put("type", "server_vad")
@@ -787,6 +807,120 @@ class LiveSessionManager(
             })
         }
         ws.send(sessionUpdate.toString())
+    }
+
+    private fun sendTranslationSessionUpdate(ws: WebSocket, targetLang: String) {
+        val cleanLang = targetLang.trim().ifBlank { "zh" }
+        val updateEvent = JSONObject().apply {
+            put("type", "session.update")
+            put("session", JSONObject().apply {
+                put("audio", JSONObject().apply {
+                    put("output", JSONObject().apply {
+                        put("language", cleanLang)
+                    })
+                })
+            })
+        }
+        ws.send(updateEvent.toString())
+    }
+
+    /**
+     * Dynamically updates the target output language during an active `gpt-realtime-translate` session
+     * without reconnecting the WebSocket. Ideal for two-way (A ⇄ B) face-to-face interpretation!
+     */
+    fun updateTranslationTargetLanguage(newLanguageCode: String) {
+        val cleanLang = newLanguageCode.trim().ifBlank { "zh" }
+        activeSettings = activeSettings.copy(translationTargetLanguage = cleanLang)
+        val ws = webSocket
+        if (ws != null && sessionStarted && activeProtocol == LiveProtocol.OPENAI_TRANSLATE && !isClosing) {
+            if (userCharsInTurn > 0 || voiceCharsInTurn > 0) {
+                advanceToNextTurn()
+            }
+            sendTranslationSessionUpdate(ws, cleanLang)
+            val langLabel = AppSettings.languageLabel(cleanLang)
+            listener.onConnectionStateChanged(
+                ConnectionState.LIVE,
+                "🌐 同步口譯中：自動偵測 70+ 語言 ➔ $langLabel"
+            )
+        }
+    }
+
+    private fun handleTranslationEvent(event: JSONObject) {
+        when (event.optString("type")) {
+            "session.created", "session.updated" -> {
+                val id = event.optJSONObject("session")?.optString("id", "").orEmpty()
+                if (id.isNotBlank()) listener.onRemoteSessionIdResolved(id)
+            }
+
+            "session.output_audio.delta" -> {
+                val delta = event.optString("delta", "")
+                if (delta.isNotEmpty()) {
+                    audioEngine?.enqueueOutputAudioBase64(delta)
+                }
+            }
+
+            "session.input_transcript.delta" -> {
+                val rawDelta = event.optString("delta", "")
+                if (rawDelta.isNotEmpty()) {
+                    val now = System.currentTimeMillis()
+                    val silenceSinceUser = if (lastUserDeltaWallMs > 0L) now - lastUserDeltaWallMs else 999_999L
+                    if (userCharsInTurn >= 24 && silenceSinceUser > 2800L) {
+                        advanceToNextTurn()
+                    }
+                    val delta = TraditionalChineseConverter.toTraditional(rawDelta, preserveJapanese = true)
+                    lastUserDeltaWallMs = now
+                    userCharsInTurn += delta.length
+                    val turnIdx = currentTurnIndex
+                    listener.onTranscriptDelta(
+                        role = MessageRole.USER,
+                        delta = delta,
+                        timelineMs = now,
+                        modelTag = "🎙️ 原音辨識",
+                        streamKey = "turn_${sessionEpochId}_${turnIdx}_user",
+                        turnIndex = turnIdx
+                    )
+                }
+            }
+
+            "session.output_transcript.delta" -> {
+                val rawDelta = event.optString("delta", "")
+                if (rawDelta.isNotEmpty()) {
+                    val now = System.currentTimeMillis()
+                    val silenceSinceVoice = if (lastVoiceDeltaWallMs > 0L) now - lastVoiceDeltaWallMs else 999_999L
+                    if (voiceCharsInTurn >= 28 && silenceSinceVoice > 2800L) {
+                        advanceToNextTurn()
+                    }
+                    val targetLang = activeSettings.translationTargetLanguage
+                    val delta = if (targetLang == "zh") {
+                        TraditionalChineseConverter.toTraditional(rawDelta, preserveJapanese = false)
+                    } else {
+                        rawDelta
+                    }
+                    lastVoiceDeltaWallMs = now
+                    voiceCharsInTurn += delta.length
+                    val turnIdx = currentTurnIndex
+                    val langShort = AppSettings.languageLabel(targetLang).substringBefore(" (")
+                    listener.onTranscriptDelta(
+                        role = MessageRole.ASSISTANT_VOICE,
+                        delta = delta,
+                        timelineMs = now,
+                        modelTag = "🌐 同步口譯 ➔ $langShort",
+                        streamKey = "turn_${sessionEpochId}_${turnIdx}_translate_${targetLang}",
+                        turnIndex = turnIdx
+                    )
+                    listener.onTurnCompleted()
+                }
+            }
+
+            "session.closed" -> {
+                disconnectImmediate()
+            }
+
+            "error" -> {
+                val errMsg = event.optJSONObject("error")?.optString("message", event.toString()) ?: event.toString()
+                listener.onError("同步口譯 API 錯誤: $errMsg")
+            }
+        }
     }
 
     private fun handleRealtimeEvent(
@@ -1023,6 +1157,10 @@ class LiveSessionManager(
                 put("type", "session.input_audio.append")
                 put("audio", base64Pcm)
             }
+            LiveProtocol.OPENAI_TRANSLATE -> JSONObject().apply {
+                put("type", "session.input_audio_buffer.append")
+                put("audio", base64Pcm)
+            }
             LiveProtocol.OPENAI_REALTIME, LiveProtocol.XAI_REALTIME -> JSONObject().apply {
                 put("type", "input_audio_buffer.append")
                 put("audio", base64Pcm)
@@ -1056,7 +1194,7 @@ class LiveSessionManager(
 
         when (activeProtocol) {
             LiveProtocol.OPENAI_LIVE -> {
-                if (activeSettings.delegationMode == DelegationMode.RESPONSES) {
+                if (!isClientDelegationSession && activeSettings.delegationMode == DelegationMode.RESPONSES) {
                     val itemCreate = JSONObject().apply {
                         put("type", "response.item.create")
                         put("event_id", "typed_${UUID.randomUUID().toString().take(8)}")
@@ -1120,6 +1258,10 @@ class LiveSessionManager(
                 }
             }
 
+            LiveProtocol.OPENAI_TRANSLATE -> {
+                // Translation sessions only accept continuous audio stream, no text turn items
+            }
+
             LiveProtocol.OPENAI_REALTIME, LiveProtocol.XAI_REALTIME -> {
                 val itemCreate = JSONObject().apply {
                     put("type", "conversation.item.create")
@@ -1156,7 +1298,9 @@ class LiveSessionManager(
 
     fun disconnectGracefully() {
         val ws = webSocket
-        if (ws != null && sessionStarted && activeProtocol == LiveProtocol.OPENAI_LIVE && !isClosing) {
+        val supportsGracefulClose =
+            activeProtocol == LiveProtocol.OPENAI_LIVE || activeProtocol == LiveProtocol.OPENAI_TRANSLATE
+        if (ws != null && sessionStarted && supportsGracefulClose && !isClosing) {
             isClosing = true
             audioEngine?.stop()
             audioEngine = null
