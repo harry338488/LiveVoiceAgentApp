@@ -38,27 +38,64 @@ class FullDuplexAudioEngine(
     @Volatile
     private var isAiCurrentlyPlaying: Boolean = false
 
+    @Volatile
+    private var simultaneousTranslationActive: Boolean = false
+
+    private fun isHeadsetConnected(audioManager: AudioManager): Boolean {
+        val devices = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+        return devices.any {
+            it.type == AudioDeviceInfo.TYPE_WIRED_HEADSET ||
+                    it.type == AudioDeviceInfo.TYPE_WIRED_HEADPHONES ||
+                    it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
+                    it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+                    it.type == AudioDeviceInfo.TYPE_BLE_HEADSET ||
+                    it.type == AudioDeviceInfo.TYPE_USB_HEADSET
+        }
+    }
+
     @SuppressLint("MissingPermission")
-    fun start(useSpeakerphone: Boolean = true) {
+    fun start(
+        useSpeakerphone: Boolean = true,
+        isSimultaneousTranslation: Boolean = false
+    ) {
         if (isRunning) return
         isRunning = true
+        simultaneousTranslationActive = isSimultaneousTranslation
 
         val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        // Keep MODE_NORMAL when on speakerphone so Android uses the full-bandwidth 24kHz/48kHz HD DAC
-        // instead of compressing audio through the 8kHz narrowband telephony voice-call pipeline.
-        audioManager.mode = if (useSpeakerphone) AudioManager.MODE_NORMAL else AudioManager.MODE_IN_COMMUNICATION
+        val headsetActive = isHeadsetConnected(audioManager)
+
+        // CRITICAL FOR SIMULTANEOUS INTERPRETATION (gpt-realtime-translate):
+        // When translating simultaneously on speakerphone (without headphones), if the phone's loudspeaker
+        // plays the translated target language into the room without Hardware AEC reference, the microphone
+        // records the phone's own speaker output! When gpt-realtime-translate hears its own target-language
+        // output or overlapping voices, it pauses/stalls translation until the speaker stops playing.
+        // Using MODE_IN_COMMUNICATION + VOICE_COMMUNICATION when not on headphones binds Android's hardware DSP
+        // Acoustic Echo Canceler (AEC) to subtract the AudioTrack playback from the microphone input in real time.
+        val useHardwareVoipAec = !headsetActive && (isSimultaneousTranslation || !useSpeakerphone)
+
+        audioManager.mode = if (useHardwareVoipAec) {
+            AudioManager.MODE_IN_COMMUNICATION
+        } else {
+            AudioManager.MODE_NORMAL
+        }
         @Suppress("DEPRECATION")
-        audioManager.isSpeakerphoneOn = useSpeakerphone
+        audioManager.isSpeakerphoneOn = useSpeakerphone && !headsetActive
 
         val minRecBuf = AudioRecord.getMinBufferSize(
             sampleRate,
             AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT
-        ).coerceAtLeast(4800)
+        ).coerceAtLeast(3840)
 
-        // VOICE_RECOGNITION provides clean, uncompressed microphone input without triggering narrowband call DSP
+        val audioSource = if (useHardwareVoipAec) {
+            MediaRecorder.AudioSource.VOICE_COMMUNICATION
+        } else {
+            MediaRecorder.AudioSource.VOICE_RECOGNITION
+        }
+
         val recorder = AudioRecord(
-            MediaRecorder.AudioSource.VOICE_RECOGNITION,
+            audioSource,
             sampleRate,
             AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT,
@@ -80,7 +117,7 @@ class FullDuplexAudioEngine(
             sampleRate,
             AudioFormat.CHANNEL_OUT_MONO,
             AudioFormat.ENCODING_PCM_16BIT
-        ).coerceAtLeast(9600)
+        ).coerceAtLeast(4800)
 
         // Allocate a generous 2-second internal ring buffer (96,000 bytes at 24kHz 16-bit mono) to prevent underruns
         val trackBufferBytes = maxOf(minPlayBuf * 4, sampleRate * 2 * 2)
@@ -88,7 +125,10 @@ class FullDuplexAudioEngine(
         val track = AudioTrack.Builder()
             .setAudioAttributes(
                 AudioAttributes.Builder()
-                    .setUsage(if (useSpeakerphone) AudioAttributes.USAGE_MEDIA else AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                    .setUsage(
+                        if (useHardwareVoipAec) AudioAttributes.USAGE_VOICE_COMMUNICATION
+                        else AudioAttributes.USAGE_MEDIA
+                    )
                     .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                     .build()
             )
@@ -101,6 +141,7 @@ class FullDuplexAudioEngine(
             )
             .setBufferSizeInBytes(trackBufferBytes)
             .setTransferMode(AudioTrack.MODE_STREAM)
+            .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
             .build()
 
         audioTrack = track
@@ -110,10 +151,10 @@ class FullDuplexAudioEngine(
         val engineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
         scope = engineScope
 
-        // Microphone Capture Loop (80ms chunks = 1920 samples = 3840 bytes at 24kHz PCM16)
+        // Microphone Capture Loop (40ms ultra-low-latency chunks = 960 samples = 1920 bytes at 24kHz PCM16)
         engineScope.launch {
             Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
-            val readBuffer = ByteArray(3840)
+            val readBuffer = ByteArray(1920)
             var pendingByte: Byte? = null
 
             while (isActive && isRunning) {
@@ -144,7 +185,6 @@ class FullDuplexAudioEngine(
                         val rms = calculateRmsLevel(alignedBytes)
                         onMicLevelChanged(rms)
 
-                        // Soft echo guard when AEC hardware is absent: if AI is playing loudly and mic RMS is very low background bleed, attenuate slightly
                         val b64 = Base64.encodeToString(alignedBytes, Base64.NO_WRAP)
                         onPcmBase64Captured(b64)
                     }
@@ -152,12 +192,14 @@ class FullDuplexAudioEngine(
             }
         }
 
-        // Dedicated High-Priority Audio Playback Thread with Jitter Pre-Buffering
-        // Pre-buffers ~200ms (9600 bytes) before starting a burst so network jitter never causes choppy gaps!
+        // Dedicated High-Priority Audio Playback Thread
+        // Note: gpt-realtime-translate emits 200ms PCM16 chunks at 1x real-time pace as the user speaks.
+        // We must NOT stall chunks in a secondary buffer or re-arm pre-buffering on brief 300ms speech pauses!
         val playThread = Thread({
             Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
-            val preBufferThresholdBytes = 9600 // 200ms at 24kHz 16-bit mono (48 bytes/ms)
-            val maxPreBufferWaitMs = 140L
+            val preBufferThresholdBytes = if (isSimultaneousTranslation) 1920 else 4800 // 40ms for translation, 100ms for agent
+            val maxPreBufferWaitMs = if (isSimultaneousTranslation) 20L else 80L
+            val reArmSilenceThresholdMs = if (isSimultaneousTranslation) 2200L else 800L
             val jitterBuffer = ByteArrayOutputStream(19200)
             var isPreBuffering = true
             var firstChunkArrivalMs = 0L
@@ -166,7 +208,7 @@ class FullDuplexAudioEngine(
 
             while (isRunning && !Thread.currentThread().isInterrupted) {
                 try {
-                    val chunk = playbackQueue.poll(20, TimeUnit.MILLISECONDS)
+                    val chunk = playbackQueue.poll(10, TimeUnit.MILLISECONDS)
                     val now = System.currentTimeMillis()
 
                     if (chunk != null && chunk.isNotEmpty()) {
@@ -185,9 +227,9 @@ class FullDuplexAudioEngine(
                                 lastWriteTimeMs = System.currentTimeMillis()
                             }
                         } else {
-                            // Drain any immediately available chunks together for smooth contiguous writes
+                            // Write immediately to AudioTrack's native ring buffer without holding chunks back
                             jitterBuffer.write(chunk)
-                            while (jitterBuffer.size() < 9600) {
+                            while (jitterBuffer.size() < 4800) {
                                 val next = playbackQueue.poll() ?: break
                                 jitterBuffer.write(next)
                             }
@@ -206,8 +248,7 @@ class FullDuplexAudioEngine(
                             isPreBuffering = false
                             isAiCurrentlyPlaying = true
                             lastWriteTimeMs = System.currentTimeMillis()
-                        } else if (!isPreBuffering && (now - lastWriteTimeMs) > 320L) {
-                            // AI paused speaking for > 320ms; re-arm jitter pre-buffer for the next sentence
+                        } else if (!isPreBuffering && (now - lastWriteTimeMs) > reArmSilenceThresholdMs) {
                             isPreBuffering = true
                             isAiCurrentlyPlaying = false
                         }
@@ -263,9 +304,11 @@ class FullDuplexAudioEngine(
 
     fun setSpeakerphone(enabled: Boolean) {
         val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        audioManager.mode = if (enabled) AudioManager.MODE_NORMAL else AudioManager.MODE_IN_COMMUNICATION
+        val headsetActive = isHeadsetConnected(audioManager)
+        val useHardwareVoipAec = !headsetActive && (simultaneousTranslationActive || !enabled)
+        audioManager.mode = if (useHardwareVoipAec) AudioManager.MODE_IN_COMMUNICATION else AudioManager.MODE_NORMAL
         @Suppress("DEPRECATION")
-        audioManager.isSpeakerphoneOn = enabled
+        audioManager.isSpeakerphoneOn = enabled && !headsetActive
     }
 
     fun stop() {

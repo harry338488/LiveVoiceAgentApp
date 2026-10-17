@@ -203,7 +203,10 @@ class LiveSessionManager(
                     LiveProtocol.OPENAI_TRANSLATE -> {
                         sendTranslationSessionUpdate(webSocket, settings.translationTargetLanguage)
                         sessionStarted = true
-                        engine.start(useSpeakerphone = useSpeakerphone)
+                        engine.start(
+                            useSpeakerphone = useSpeakerphone,
+                            isSimultaneousTranslation = true
+                        )
                         val langLabel = AppSettings.languageLabel(settings.translationTargetLanguage)
                         listener.onConnectionStateChanged(
                             ConnectionState.LIVE,
@@ -815,6 +818,11 @@ class LiveSessionManager(
             put("type", "session.update")
             put("session", JSONObject().apply {
                 put("audio", JSONObject().apply {
+                    put("input", JSONObject().apply {
+                        put("noise_reduction", JSONObject().apply {
+                            put("type", "near_field")
+                        })
+                    })
                     put("output", JSONObject().apply {
                         put("language", cleanLang)
                     })
