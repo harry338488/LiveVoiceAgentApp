@@ -4,6 +4,7 @@ import android.content.Context
 import com.example.livevoiceagent.audio.FullDuplexAudioEngine
 import com.example.livevoiceagent.model.*
 import com.example.livevoiceagent.tools.CalendarToolManager
+import com.example.livevoiceagent.util.TraditionalChineseConverter
 import kotlinx.coroutines.*
 import okhttp3.*
 import org.json.JSONArray
@@ -15,7 +16,7 @@ enum class ConnectionState(val label: String) {
     DISCONNECTED("未連線"),
     CONNECTING("連線建立中..."),
     LIVE("即時通話中 (Full-Duplex)"),
-    DELEGATING("後端大腦處理/搜尋/行事曆操作中..."),
+    DELEGATING("後端搜尋/處理中 (仍可繼續語音聊天)..."),
     CLOSING("正在儲存並結束通話...")
 }
 
@@ -62,6 +63,9 @@ class LiveSessionManager(
 
     @Volatile
     private var isClosing: Boolean = false
+
+    @Volatile
+    private var isClientDelegationSession: Boolean = true
 
     // Turn-based state machine: guarantees 1 unbroken User bubble + 1 unbroken Assistant Voice bubble per turn,
     // with Backend Brain & Linkup Search cards neatly attached below the voice bubble of that turn.
@@ -241,14 +245,25 @@ class LiveSessionManager(
         val backModel = settings.backendBrainModel.trim().ifBlank { "gpt-6-luna" }
         val timeContext = CalendarToolManager.buildCurrentTimeContextString()
 
-        val useClientDelegation = settings.delegationMode == DelegationMode.CLIENT ||
+        // IMPORTANT: In OpenAI /v1/live/sessions, client-side tools (Linkup API & Android Calendar)
+        // MUST use `delegation: { type: "client" }` (`session.thinking.append` + `session.commentary.append`),
+        // because `/v1/live/sessions` does not accept `response.item.create` for client function_call_output,
+        // and `type: "client"` keeps gpt-live-1 in full-duplex conversation with the user while searching!
+        val hasLocalClientTools =
+            (settings.linkupSearchEnabled && settings.linkupApiKey.isNotBlank()) ||
+                    settings.calendarToolsEnabled
+
+        val useClientDelegation = hasLocalClientTools ||
+                settings.delegationMode == DelegationMode.CLIENT ||
                 backModel.lowercase().startsWith("grok") ||
                 (settings.customBackendBaseUrl.isNotBlank() &&
                         !settings.customBackendBaseUrl.contains("api.openai.com"))
 
+        isClientDelegationSession = useClientDelegation
+
         val sessionObj = JSONObject().apply {
             put("model", frontModel)
-            put("instructions", "$timeContext\n\n${settings.voiceSystemInstructions}")
+            put("instructions", "$timeContext\n\n${settings.voiceSystemInstructions}\n（補充：當後端正在查詢資料或搜尋時，你可以繼續自然地與使用者閒聊互動，直到收到後端結果為止。）")
 
             val seedArray = buildSeedInputArray(priorMessages)
             if (seedArray.length() > 0) {
@@ -271,12 +286,6 @@ class LiveSessionManager(
                 })
             } else {
                 val toolsArr = JSONArray()
-                if (settings.linkupSearchEnabled && settings.linkupApiKey.isNotBlank()) {
-                    toolsArr.put(LinkupSearchClient.buildResponsesToolSchema())
-                }
-                if (settings.calendarToolsEnabled) {
-                    CalendarToolManager.buildResponsesCalendarToolSchemas().forEach { toolsArr.put(it) }
-                }
                 if (settings.openAiNativeSearchEnabled) {
                     toolsArr.put(JSONObject().apply { put("type", "web_search") })
                 }
@@ -363,16 +372,16 @@ class LiveSessionManager(
             }
 
             "session.input_transcript.delta" -> {
-                val delta = event.optString("delta", "")
+                val rawDelta = event.optString("delta", "")
                 val startMs = event.optLong("start_ms", 0L)
-                if (delta.isNotEmpty()) {
+                if (rawDelta.isNotEmpty()) {
+                    // Convert Simplified Chinese ASR output to Traditional Chinese immediately
+                    val delta = TraditionalChineseConverter.toTraditional(rawDelta)
                     val now = System.currentTimeMillis()
                     val silenceSinceVoice = if (lastVoiceDeltaWallMs > 0L) now - lastVoiceDeltaWallMs else 999_999L
                     val silenceSinceUser = if (lastUserDeltaWallMs > 0L) now - lastUserDeltaWallMs else 999_999L
                     val silenceSinceDelegation = if (lastDelegationDoneWallMs > 0L) now - lastDelegationDoneWallMs else 999_999L
 
-                    // Advance to a new turn ONLY if the previous turn has actually been answered by the AI
-                    // and no delegation/tool call is currently running.
                     val previousTurnFinishedWithDelegation =
                         delegationCompletedInTurn && !isDelegationActive && !isToolCallRunning &&
                                 (voiceCharsAfterDelegation >= 6 || silenceSinceDelegation > 3500L) &&
@@ -409,12 +418,10 @@ class LiveSessionManager(
             }
 
             "session.output_transcript.delta" -> {
-                val delta = event.optString("delta", "")
+                val rawDelta = event.optString("delta", "")
                 val startMs = event.optLong("start_ms", 0L)
-                if (delta.isNotEmpty()) {
-                    // NEVER split the Assistant Voice bubble within a turn!
-                    // Both pre-delegation filler ("好的，我幫你查一下...") and post-delegation answer ("查到了！結果是...")
-                    // stay inside the exact same Assistant Voice bubble for this turn, separated by a clean paragraph break.
+                if (rawDelta.isNotEmpty()) {
+                    val delta = TraditionalChineseConverter.toTraditional(rawDelta)
                     val formattedDelta = if (needsVoiceParagraphBreak && voiceCharsInTurn > 0) {
                         needsVoiceParagraphBreak = false
                         "\n\n$delta"
@@ -444,8 +451,15 @@ class LiveSessionManager(
 
             "session.delegation.created" -> {
                 val delegationObj = event.optJSONObject("delegation")
-                val delegationId = delegationObj?.optString("id", "").orEmpty()
-                val target = delegationObj?.optString("target", "responses").orEmpty()
+                val delegationId = delegationObj?.optString("id", "")
+                    ?.takeIf { it.isNotBlank() }
+                    ?: event.optString("delegation_id", "")
+                val target = delegationObj?.optString("target", "").orEmpty()
+
+                val delegationHint = listOf("query", "input", "instructions", "description", "prompt")
+                    .firstNotNullOfOrNull { key ->
+                        delegationObj?.optString(key, "")?.takeIf { it.isNotBlank() }
+                    }
 
                 isDelegationActive = true
                 if (voiceCharsInTurn > 0) {
@@ -455,15 +469,39 @@ class LiveSessionManager(
                 val turnIdx = currentTurnIndex
                 listener.onConnectionStateChanged(
                     ConnectionState.DELEGATING,
-                    "後端 ${settings.backendBrainModel} 正在推理/搜尋/處理任務..."
+                    "後端 ${settings.backendBrainModel} 搜尋與推理中（你仍可繼續說話聊天）..."
                 )
 
-                if (target == "client" && delegationId.isNotBlank()) {
+                if ((isClientDelegationSession || target == "client") && delegationId.isNotBlank()) {
+                    // Immediately send initial thinking event so gpt-live-1 stays responsive and can keep chatting with the user
+                    runCatching {
+                        webSocket.send(JSONObject().apply {
+                            put("type", "session.thinking.append")
+                            put("event_id", "think_init_${UUID.randomUUID().toString().take(8)}")
+                            put("delegation_id", delegationId)
+                            put("content", "後端模型 ${settings.backendBrainModel} 已開始查詢資料。若使用者在這期間繼續說話，請自然陪他聊天互動。")
+                        }.toString())
+                    }
+
                     scope.launch {
+                        // Brief wait so any trailing input_transcript.delta chunks from the user's utterance finish arriving
+                        delay(380)
                         val snapshot = conversationSnapshotProvider()
+
                         val res = backendLlmClient.runDelegatedTask(
                             settings = settings,
                             conversationHistory = snapshot,
+                            taskHint = delegationHint,
+                            onThinkingStatusUpdate = { statusMsg ->
+                                runCatching {
+                                    webSocket.send(JSONObject().apply {
+                                        put("type", "session.thinking.append")
+                                        put("event_id", "think_${UUID.randomUUID().toString().take(8)}")
+                                        put("delegation_id", delegationId)
+                                        put("content", statusMsg)
+                                    }.toString())
+                                }
+                            },
                             onSearchExecuted = { searchResult ->
                                 listener.onSearchCardAdded(searchResult, turnIdx)
                             },
@@ -493,7 +531,7 @@ class LiveSessionManager(
                                 put("type", "session.commentary.append")
                                 put("event_id", "commentary_${UUID.randomUUID().toString().take(8)}")
                                 put("delegation_id", delegationId)
-                                put("content", brainResp.spokenSummary.take(1200))
+                                put("content", brainResp.spokenSummary.take(1400))
                             }
                             webSocket.send(commentaryEvent.toString())
                             isDelegationActive = false
@@ -511,6 +549,14 @@ class LiveSessionManager(
                             isDelegationActive = false
                             delegationCompletedInTurn = true
                             lastDelegationDoneWallMs = System.currentTimeMillis()
+                            runCatching {
+                                webSocket.send(JSONObject().apply {
+                                    put("type", "session.commentary.append")
+                                    put("event_id", "commentary_err_${UUID.randomUUID().toString().take(8)}")
+                                    put("delegation_id", delegationId)
+                                    put("content", "後端查詢發生錯誤：${err.message}，請先以已知資訊回答使用者。")
+                                }.toString())
+                            }
                             listener.onError("後端委派執行失敗: ${err.message}")
                             listener.onConnectionStateChanged(
                                 ConnectionState.LIVE,
@@ -535,9 +581,10 @@ class LiveSessionManager(
                         }
                     }
                     "response.output_text.delta" -> {
-                        val delta = inner.optString("delta", "")
+                        val rawDelta = inner.optString("delta", "")
                         val itemId = inner.optString("item_id", delegationId)
-                        if (delta.isNotEmpty()) {
+                        if (rawDelta.isNotEmpty()) {
+                            val delta = TraditionalChineseConverter.toTraditional(rawDelta)
                             isDelegationActive = true
                             val prefix = if (lastBackendItemId.isNotEmpty() && lastBackendItemId != itemId) "\n\n" else ""
                             lastBackendItemId = itemId
@@ -561,7 +608,7 @@ class LiveSessionManager(
                             val argsStr = item.optString("arguments", "{}")
                             if (callId.isNotBlank()) {
                                 isToolCallRunning = true
-                                handleResponsesFunctionToolCall(webSocket, callId, fnName, argsStr, settings, turnIdx)
+                                handleResponsesFunctionToolCall(webSocket, delegationId, callId, fnName, argsStr, settings, turnIdx)
                             }
                         }
                     }
@@ -604,6 +651,7 @@ class LiveSessionManager(
 
     private fun handleResponsesFunctionToolCall(
         webSocket: WebSocket,
+        delegationId: String,
         callId: String,
         fnName: String,
         argsStr: String,
@@ -664,25 +712,21 @@ class LiveSessionManager(
                     }
                 }
 
-                val itemCreateEvent = JSONObject().apply {
-                    put("type", "response.item.create")
-                    put("event_id", "tool_res_${UUID.randomUUID().toString().take(8)}")
-                    put("item", JSONObject().apply {
-                        put("type", "function_call_output")
-                        put("call_id", callId)
-                        put("output", toolOutputText)
-                    })
-                }
-                webSocket.send(itemCreateEvent.toString())
+                // Feed the tool result back to the live session via session.commentary.append
+                webSocket.send(JSONObject().apply {
+                    put("type", "session.commentary.append")
+                    put("event_id", "tool_comm_${UUID.randomUUID().toString().take(8)}")
+                    put("delegation_id", delegationId)
+                    put("content", TraditionalChineseConverter.toTraditional(toolOutputText).take(1400))
+                }.toString())
 
                 isToolCallRunning = false
-                isDelegationActive = true
-
-                val continueEvent = JSONObject().apply {
-                    put("type", "response.create")
-                    put("event_id", "continue_${UUID.randomUUID().toString().take(8)}")
+                isDelegationActive = false
+                delegationCompletedInTurn = true
+                lastDelegationDoneWallMs = System.currentTimeMillis()
+                if (voiceCharsInTurn > 0) {
+                    needsVoiceParagraphBreak = true
                 }
-                webSocket.send(continueEvent.toString())
             } catch (e: Exception) {
                 isToolCallRunning = false
                 isDelegationActive = false
@@ -732,6 +776,8 @@ class LiveSessionManager(
                 put("output_audio_format", "pcm16")
                 put("input_audio_transcription", JSONObject().apply {
                     put("model", "whisper-1")
+                    put("language", "zh")
+                    put("prompt", "繁體中文，台灣正體字。")
                 })
                 put("turn_detection", JSONObject().apply {
                     put("type", "server_vad")
@@ -760,8 +806,9 @@ class LiveSessionManager(
             }
 
             "conversation.item.input_audio_transcription.completed" -> {
-                val transcript = event.optString("transcript", "")
-                if (transcript.isNotBlank()) {
+                val rawTranscript = event.optString("transcript", "")
+                if (rawTranscript.isNotBlank()) {
+                    val transcript = TraditionalChineseConverter.toTraditional(rawTranscript)
                     val now = System.currentTimeMillis()
                     if (!isDelegationActive && !isToolCallRunning && voiceCharsInTurn >= 6) {
                         advanceToNextTurn()
@@ -790,8 +837,9 @@ class LiveSessionManager(
             }
 
             "response.audio_transcript.delta", "response.output_audio_transcript.delta" -> {
-                val delta = event.optString("delta", "")
-                if (delta.isNotEmpty()) {
+                val rawDelta = event.optString("delta", "")
+                if (rawDelta.isNotEmpty()) {
+                    val delta = TraditionalChineseConverter.toTraditional(rawDelta)
                     val formatted = if (needsVoiceParagraphBreak && voiceCharsInTurn > 0) {
                         needsVoiceParagraphBreak = false
                         "\n\n$delta"

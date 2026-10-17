@@ -4,6 +4,7 @@ import com.example.livevoiceagent.model.AppSettings
 import com.example.livevoiceagent.model.ChatMessage
 import com.example.livevoiceagent.model.MessageRole
 import com.example.livevoiceagent.tools.CalendarToolManager
+import com.example.livevoiceagent.util.TraditionalChineseConverter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -26,153 +27,400 @@ class BackendLlmClient(
 ) {
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
+        .readTimeout(65, TimeUnit.SECONDS)
         .build()
 
     /**
      * Executes a backend reasoning task using the user's chosen Backend LLM (e.g., gpt-6-luna, grok-4, etc.)
-     * Automatically injects real-time Date/Time/Timezone context and supports Linkup Web Search + Android Calendar tools.
+     * Supports both OpenAI's `/v1/responses` API (primary for `gpt-6-luna` etc.) and `/v1/chat/completions` (fallback),
+     * while emitting live `onThinkingStatusUpdate` events so the frontend voice model can keep chatting with the user!
      */
     suspend fun runDelegatedTask(
         settings: AppSettings,
         conversationHistory: List<ChatMessage>,
         taskHint: String? = null,
+        onThinkingStatusUpdate: (String) -> Unit = {},
         onSearchExecuted: (LinkupSearchResult) -> Unit = {},
         onCalendarActionLogged: (String) -> Unit = {}
     ): Result<BackendBrainResponse> = withContext(Dispatchers.IO) {
         runCatching {
             val (baseUrl, apiKey, model) = resolveBackendCredentials(settings)
             val timeContext = CalendarToolManager.buildCurrentTimeContextString()
-
-            val messagesArr = JSONArray()
-            messagesArr.put(JSONObject().apply {
-                put("role", "system")
-                put(
-                    "content",
-                    """
-                    $timeContext
-                    
-                    ${settings.backendSystemInstructions}
-                    """.trimIndent()
-                )
-            })
-
-            // Include recent conversation history for context
-            conversationHistory
-                .filter { it.role == MessageRole.USER || it.role == MessageRole.ASSISTANT_VOICE || it.role == MessageRole.BACKEND_BRAIN }
-                .takeLast(14)
-                .forEach { msg ->
-                    val roleStr = if (msg.role == MessageRole.USER) "user" else "assistant"
-                    if (msg.text.isNotBlank()) {
-                        messagesArr.put(JSONObject().apply {
-                            put("role", roleStr)
-                            put("content", msg.text)
-                        })
-                    }
-                }
-
-            if (!taskHint.isNullOrBlank()) {
-                messagesArr.put(JSONObject().apply {
-                    put("role", "user")
-                    put("content", taskHint)
-                })
-            }
+            val systemInstructions = "$timeContext\n\n${settings.backendSystemInstructions}"
 
             val collectedSearches = mutableListOf<LinkupSearchResult>()
             val canUseLinkup = settings.linkupSearchEnabled && settings.linkupApiKey.isNotBlank()
             val canUseCalendar = settings.calendarToolsEnabled
 
-            val toolsArray = JSONArray()
-            if (canUseLinkup) {
-                toolsArray.put(LinkupSearchClient.buildChatCompletionsToolSchema())
-            }
-            if (canUseCalendar) {
-                CalendarToolManager.buildChatCompletionsCalendarToolSchemas().forEach { toolsArray.put(it) }
-            }
+            onThinkingStatusUpdate("後端模型 $model 正在分析問題與檢索資料，若使用者說話請自然陪他聊天...")
 
-            // Up to 3 tool-call rounds (e.g. list_calendar_events -> update_calendar_event -> final answer)
-            var finalContent = ""
-            for (round in 0 until 3) {
-                val respJson = callChatCompletions(
+            val isOpenAiEndpoint = baseUrl.contains("api.openai.com")
+
+            val finalContent = if (isOpenAiEndpoint) {
+                runCatching {
+                    runViaOpenAiResponsesApi(
+                        baseUrl = baseUrl,
+                        apiKey = apiKey,
+                        model = model,
+                        systemInstructions = systemInstructions,
+                        conversationHistory = conversationHistory,
+                        taskHint = taskHint,
+                        settings = settings,
+                        canUseLinkup = canUseLinkup,
+                        canUseCalendar = canUseCalendar,
+                        collectedSearches = collectedSearches,
+                        onThinkingStatusUpdate = onThinkingStatusUpdate,
+                        onSearchExecuted = onSearchExecuted,
+                        onCalendarActionLogged = onCalendarActionLogged
+                    )
+                }.getOrElse {
+                    runViaChatCompletionsApi(
+                        baseUrl = baseUrl,
+                        apiKey = apiKey,
+                        model = model,
+                        systemInstructions = systemInstructions,
+                        conversationHistory = conversationHistory,
+                        taskHint = taskHint,
+                        settings = settings,
+                        canUseLinkup = canUseLinkup,
+                        canUseCalendar = canUseCalendar,
+                        collectedSearches = collectedSearches,
+                        onThinkingStatusUpdate = onThinkingStatusUpdate,
+                        onSearchExecuted = onSearchExecuted,
+                        onCalendarActionLogged = onCalendarActionLogged
+                    )
+                }
+            } else {
+                runViaChatCompletionsApi(
                     baseUrl = baseUrl,
                     apiKey = apiKey,
                     model = model,
-                    messages = messagesArr,
-                    tools = if (round < 2 && toolsArray.length() > 0) toolsArray else null
+                    systemInstructions = systemInstructions,
+                    conversationHistory = conversationHistory,
+                    taskHint = taskHint,
+                    settings = settings,
+                    canUseLinkup = canUseLinkup,
+                    canUseCalendar = canUseCalendar,
+                    collectedSearches = collectedSearches,
+                    onThinkingStatusUpdate = onThinkingStatusUpdate,
+                    onSearchExecuted = onSearchExecuted,
+                    onCalendarActionLogged = onCalendarActionLogged
                 )
-
-                val choice = respJson.optJSONArray("choices")?.optJSONObject(0)
-                    ?: throw IllegalStateException("後端模型未回傳有效 choices")
-                val messageObj = choice.optJSONObject("message")
-                    ?: throw IllegalStateException("後端模型未回傳有效 message")
-
-                val toolCalls = messageObj.optJSONArray("tool_calls")
-                if (toolCalls == null || toolCalls.length() == 0) {
-                    finalContent = messageObj.optString("content", "")
-                    break
-                }
-
-                // Append assistant message containing tool_calls
-                messagesArr.put(messageObj)
-
-                for (i in 0 until toolCalls.length()) {
-                    val tc = toolCalls.optJSONObject(i) ?: continue
-                    val callId = tc.optString("id", "call_${round}_$i")
-                    val fnObj = tc.optJSONObject("function")
-                    val fnName = fnObj?.optString("name", "") ?: ""
-                    val argsStr = fnObj?.optString("arguments", "{}") ?: "{}"
-                    val argsJson = runCatching { JSONObject(argsStr) }.getOrDefault(JSONObject())
-
-                    val toolOutput: String = when {
-                        fnName == "linkup_web_search" -> {
-                            val query = argsJson.optString("query", taskHint ?: "")
-                            val depth = argsJson.optString("depth", settings.linkupSearchDepth)
-                            val searchRes = linkupClient.search(
-                                apiKey = settings.linkupApiKey,
-                                query = query,
-                                depth = depth
-                            ).getOrElse { err ->
-                                LinkupSearchResult(
-                                    query = query,
-                                    answer = "搜尋失敗: ${err.message}",
-                                    sources = emptyList(),
-                                    rawFormattedForLlm = "Linkup 搜尋錯誤: ${err.message}"
-                                )
-                            }
-                            collectedSearches.add(searchRes)
-                            onSearchExecuted(searchRes)
-                            searchRes.rawFormattedForLlm
-                        }
-
-                        CalendarToolManager.CALENDAR_TOOL_NAMES.contains(fnName) -> {
-                            val calRes = calendarToolManager.executeCalendarTool(fnName, argsJson)
-                            onCalendarActionLogged("📅 行事曆操作 (`$fnName`):\n$calRes")
-                            calRes
-                        }
-
-                        else -> "{\"status\":\"error\",\"message\":\"Unsupported tool: $fnName\"}"
-                    }
-
-                    messagesArr.put(JSONObject().apply {
-                        put("role", "tool")
-                        put("tool_call_id", callId)
-                        put("content", toolOutput)
-                    })
-                }
             }
 
-            val spokenSummary = if (finalContent.length > 700) {
-                finalContent.take(700) + "...（完整細節已留存在對話紀錄中）"
+            val tradContent = TraditionalChineseConverter.toTraditional(finalContent.trim())
+            val spokenSummary = if (tradContent.length > 800) {
+                tradContent.take(800) + "...（完整細節已留存在對話紀錄的思考重點中）"
             } else {
-                finalContent
+                tradContent
             }
 
             BackendBrainResponse(
                 spokenSummary = spokenSummary,
-                detailedNotes = finalContent,
+                detailedNotes = tradContent,
                 searchResults = collectedSearches
             )
         }
+    }
+
+    private suspend fun runViaOpenAiResponsesApi(
+        baseUrl: String,
+        apiKey: String,
+        model: String,
+        systemInstructions: String,
+        conversationHistory: List<ChatMessage>,
+        taskHint: String?,
+        settings: AppSettings,
+        canUseLinkup: Boolean,
+        canUseCalendar: Boolean,
+        collectedSearches: MutableList<LinkupSearchResult>,
+        onThinkingStatusUpdate: (String) -> Unit,
+        onSearchExecuted: (LinkupSearchResult) -> Unit,
+        onCalendarActionLogged: (String) -> Unit
+    ): String {
+        val inputArr = JSONArray()
+        conversationHistory
+            .filter { it.role == MessageRole.USER || it.role == MessageRole.ASSISTANT_VOICE }
+            .takeLast(14)
+            .forEach { msg ->
+                val isUser = msg.role == MessageRole.USER
+                val text = buildString {
+                    if (msg.text.isNotBlank()) append(msg.text.trim())
+                    if (msg.backendThinkingText.isNotBlank()) {
+                        if (isNotEmpty()) append("\n")
+                        append(msg.backendThinkingText.trim())
+                    }
+                }.trim()
+                if (text.isNotEmpty()) {
+                    inputArr.put(JSONObject().apply {
+                        put("type", "message")
+                        put("role", if (isUser) "user" else "assistant")
+                        put("content", JSONArray().put(JSONObject().apply {
+                            put("type", if (isUser) "input_text" else "output_text")
+                            put("text", text.take(1500))
+                        }))
+                    })
+                }
+            }
+
+        if (!taskHint.isNullOrBlank()) {
+            inputArr.put(JSONObject().apply {
+                put("type", "message")
+                put("role", "user")
+                put("content", JSONArray().put(JSONObject().apply {
+                    put("type", "input_text")
+                    put("text", taskHint)
+                }))
+            })
+        }
+
+        val toolsArr = JSONArray()
+        if (canUseLinkup) {
+            toolsArr.put(LinkupSearchClient.buildResponsesToolSchema())
+        }
+        if (canUseCalendar) {
+            CalendarToolManager.buildResponsesCalendarToolSchemas().forEach { toolsArr.put(it) }
+        }
+        if (settings.openAiNativeSearchEnabled) {
+            toolsArr.put(JSONObject().apply { put("type", "web_search") })
+        }
+
+        var finalText = ""
+        for (round in 0 until 4) {
+            val payload = JSONObject().apply {
+                put("model", model)
+                put("instructions", systemInstructions)
+                put("input", inputArr)
+                if (round < 3 && toolsArr.length() > 0) {
+                    put("tools", toolsArr)
+                    put("tool_choice", "auto")
+                }
+            }
+
+            val req = Request.Builder()
+                .url("$baseUrl/responses")
+                .addHeader("Authorization", "Bearer $apiKey")
+                .addHeader("Content-Type", "application/json")
+                .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+                .build()
+
+            val respJson = httpClient.newCall(req).execute().use { resp ->
+                val body = resp.body?.string() ?: ""
+                if (!resp.isSuccessful) {
+                    throw IllegalStateException("Responses API HTTP ${resp.code}: ${body.take(200)}")
+                }
+                JSONObject(body)
+            }
+
+            val outputArr = respJson.optJSONArray("output") ?: JSONArray()
+            val functionCalls = mutableListOf<JSONObject>()
+            val textParts = StringBuilder()
+
+            for (i in 0 until outputArr.length()) {
+                val item = outputArr.optJSONObject(i) ?: continue
+                when (item.optString("type")) {
+                    "function_call" -> {
+                        functionCalls.add(item)
+                        inputArr.put(item)
+                    }
+                    "message" -> {
+                        val contentArr = item.optJSONArray("content")
+                        if (contentArr != null) {
+                            for (j in 0 until contentArr.length()) {
+                                val c = contentArr.optJSONObject(j) ?: continue
+                                val t = c.optString("text", "")
+                                if (t.isNotBlank()) {
+                                    if (textParts.isNotEmpty()) textParts.append("\n")
+                                    textParts.append(t)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (functionCalls.isEmpty()) {
+                finalText = textParts.toString().ifBlank { respJson.optString("output_text", "") }
+                break
+            }
+
+            for (fc in functionCalls) {
+                val callId = fc.optString("call_id", "")
+                val fnName = fc.optString("name", "")
+                val argsStr = fc.optString("arguments", "{}")
+                val argsJson = runCatching { JSONObject(argsStr) }.getOrDefault(JSONObject())
+
+                val toolOutput: String = when {
+                    fnName == "linkup_web_search" -> {
+                        val query = argsJson.optString("query", taskHint ?: "")
+                        val depth = argsJson.optString("depth", settings.linkupSearchDepth)
+                        onThinkingStatusUpdate("正在透過 Linkup 搜尋最新資料：「$query」，若使用者說話請自然陪他聊天...")
+                        val searchRes = linkupClient.search(
+                            apiKey = settings.linkupApiKey,
+                            query = query,
+                            depth = depth
+                        ).getOrElse { err ->
+                            LinkupSearchResult(
+                                query = query,
+                                answer = "搜尋失敗: ${err.message}",
+                                sources = emptyList(),
+                                rawFormattedForLlm = "Linkup 搜尋錯誤: ${err.message}"
+                            )
+                        }
+                        collectedSearches.add(searchRes)
+                        onSearchExecuted(searchRes)
+                        onThinkingStatusUpdate("已完成 Linkup 搜尋「$query」，後端模型 $model 正在整理重點...")
+                        searchRes.rawFormattedForLlm
+                    }
+
+                    CalendarToolManager.CALENDAR_TOOL_NAMES.contains(fnName) -> {
+                        onThinkingStatusUpdate("正在執行手機行事曆操作 ($fnName)...")
+                        val calRes = calendarToolManager.executeCalendarTool(fnName, argsJson)
+                        onCalendarActionLogged("📅 行事曆操作 (`$fnName`):\n$calRes")
+                        calRes
+                    }
+
+                    else -> "{\"status\":\"error\",\"message\":\"Unsupported tool: $fnName\"}"
+                }
+
+                inputArr.put(JSONObject().apply {
+                    put("type", "function_call_output")
+                    put("call_id", callId)
+                    put("output", toolOutput)
+                })
+            }
+        }
+        return finalText
+    }
+
+    private suspend fun runViaChatCompletionsApi(
+        baseUrl: String,
+        apiKey: String,
+        model: String,
+        systemInstructions: String,
+        conversationHistory: List<ChatMessage>,
+        taskHint: String?,
+        settings: AppSettings,
+        canUseLinkup: Boolean,
+        canUseCalendar: Boolean,
+        collectedSearches: MutableList<LinkupSearchResult>,
+        onThinkingStatusUpdate: (String) -> Unit,
+        onSearchExecuted: (LinkupSearchResult) -> Unit,
+        onCalendarActionLogged: (String) -> Unit
+    ): String {
+        val messagesArr = JSONArray()
+        messagesArr.put(JSONObject().apply {
+            put("role", "system")
+            put("content", systemInstructions)
+        })
+
+        conversationHistory
+            .filter { it.role == MessageRole.USER || it.role == MessageRole.ASSISTANT_VOICE }
+            .takeLast(14)
+            .forEach { msg ->
+                val roleStr = if (msg.role == MessageRole.USER) "user" else "assistant"
+                val text = buildString {
+                    if (msg.text.isNotBlank()) append(msg.text.trim())
+                    if (msg.backendThinkingText.isNotBlank()) {
+                        if (isNotEmpty()) append("\n")
+                        append(msg.backendThinkingText.trim())
+                    }
+                }.trim()
+                if (text.isNotEmpty()) {
+                    messagesArr.put(JSONObject().apply {
+                        put("role", roleStr)
+                        put("content", text)
+                    })
+                }
+            }
+
+        if (!taskHint.isNullOrBlank()) {
+            messagesArr.put(JSONObject().apply {
+                put("role", "user")
+                put("content", taskHint)
+            })
+        }
+
+        val toolsArray = JSONArray()
+        if (canUseLinkup) {
+            toolsArray.put(LinkupSearchClient.buildChatCompletionsToolSchema())
+        }
+        if (canUseCalendar) {
+            CalendarToolManager.buildChatCompletionsCalendarToolSchemas().forEach { toolsArray.put(it) }
+        }
+
+        var finalContent = ""
+        for (round in 0 until 4) {
+            val respJson = callChatCompletions(
+                baseUrl = baseUrl,
+                apiKey = apiKey,
+                model = model,
+                messages = messagesArr,
+                tools = if (round < 3 && toolsArray.length() > 0) toolsArray else null
+            )
+
+            val choice = respJson.optJSONArray("choices")?.optJSONObject(0)
+                ?: throw IllegalStateException("後端模型未回傳有效 choices")
+            val messageObj = choice.optJSONObject("message")
+                ?: throw IllegalStateException("後端模型未回傳有效 message")
+
+            val toolCalls = messageObj.optJSONArray("tool_calls")
+            if (toolCalls == null || toolCalls.length() == 0) {
+                finalContent = messageObj.optString("content", "")
+                break
+            }
+
+            messagesArr.put(messageObj)
+
+            for (i in 0 until toolCalls.length()) {
+                val tc = toolCalls.optJSONObject(i) ?: continue
+                val callId = tc.optString("id", "call_${round}_$i")
+                val fnObj = tc.optJSONObject("function")
+                val fnName = fnObj?.optString("name", "") ?: ""
+                val argsStr = fnObj?.optString("arguments", "{}") ?: "{}"
+                val argsJson = runCatching { JSONObject(argsStr) }.getOrDefault(JSONObject())
+
+                val toolOutput: String = when {
+                    fnName == "linkup_web_search" -> {
+                        val query = argsJson.optString("query", taskHint ?: "")
+                        val depth = argsJson.optString("depth", settings.linkupSearchDepth)
+                        onThinkingStatusUpdate("正在透過 Linkup 搜尋最新資料：「$query」，若使用者說話請自然陪他聊天...")
+                        val searchRes = linkupClient.search(
+                            apiKey = settings.linkupApiKey,
+                            query = query,
+                            depth = depth
+                        ).getOrElse { err ->
+                            LinkupSearchResult(
+                                query = query,
+                                answer = "搜尋失敗: ${err.message}",
+                                sources = emptyList(),
+                                rawFormattedForLlm = "Linkup 搜尋錯誤: ${err.message}"
+                            )
+                        }
+                        collectedSearches.add(searchRes)
+                        onSearchExecuted(searchRes)
+                        onThinkingStatusUpdate("已完成 Linkup 搜尋「$query」，後端模型 $model 正在整理重點...")
+                        searchRes.rawFormattedForLlm
+                    }
+
+                    CalendarToolManager.CALENDAR_TOOL_NAMES.contains(fnName) -> {
+                        onThinkingStatusUpdate("正在執行手機行事曆操作 ($fnName)...")
+                        val calRes = calendarToolManager.executeCalendarTool(fnName, argsJson)
+                        onCalendarActionLogged("📅 行事曆操作 (`$fnName`):\n$calRes")
+                        calRes
+                    }
+
+                    else -> "{\"status\":\"error\",\"message\":\"Unsupported tool: $fnName\"}"
+                }
+
+                messagesArr.put(JSONObject().apply {
+                    put("role", "tool")
+                    put("tool_call_id", callId)
+                    put("content", toolOutput)
+                })
+            }
+        }
+        return finalContent
     }
 
     /**
@@ -185,9 +433,12 @@ class BackendLlmClient(
         runCatching {
             val (baseUrl, apiKey, model) = resolveBackendCredentials(settings)
             val snippet = messages
-                .filter { it.role == MessageRole.USER || it.role == MessageRole.ASSISTANT_VOICE || it.role == MessageRole.BACKEND_BRAIN }
+                .filter { it.role == MessageRole.USER || it.role == MessageRole.ASSISTANT_VOICE }
                 .take(4)
-                .joinToString("\n") { "${if (it.role == MessageRole.USER) "使用者" else "AI"}: ${it.text.take(150)}" }
+                .joinToString("\n") {
+                    val content = it.text.ifBlank { it.backendThinkingText }
+                    "${if (it.role == MessageRole.USER) "使用者" else "AI"}: ${content.take(150)}"
+                }
 
             if (snippet.isBlank()) return@withContext null
 
@@ -210,7 +461,7 @@ class BackendLlmClient(
                 tools = null
             )
 
-            resp.optJSONArray("choices")
+            val rawTitle = resp.optJSONArray("choices")
                 ?.optJSONObject(0)
                 ?.optJSONObject("message")
                 ?.optString("content", "")
@@ -222,6 +473,8 @@ class BackendLlmClient(
                 ?.firstOrNull()
                 ?.take(22)
                 ?.takeIf { it.isNotBlank() }
+
+            rawTitle?.let { TraditionalChineseConverter.toTraditional(it) }
         }.getOrNull()
     }
 
