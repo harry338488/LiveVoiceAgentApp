@@ -456,7 +456,7 @@ class LiveSessionManager(
                 }
                 audioEngine?.start(
                     useSpeakerphone = useSpeakerphone,
-                    isSimultaneousTranslation = promptInterpreter
+                    isSimultaneousTranslation = false
                 )
                 val statusMsg = if (promptInterpreter) {
                     val langLabel = AppSettings.languageLabel(activeSettings.translationTargetLanguage)
