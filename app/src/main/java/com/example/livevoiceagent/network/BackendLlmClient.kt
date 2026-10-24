@@ -531,15 +531,49 @@ class BackendLlmClient(
             }
 
             val isOpenAiEndpoint = baseUrl.contains("api.openai.com")
-            val rawOutput = if (isOpenAiEndpoint) {
+            val rawOutput: String = if (isOpenAiEndpoint) {
                 runCatching {
                     val payload = JSONObject().apply {
                         put("model", model)
                         put("instructions", systemPrompt)
                         put("input", userContent)
                     }
-                    val resp = callResponses(baseUrl, apiKey, model, payload)
-                    extractTextFromResponsesObject(resp)
+                    val req = Request.Builder()
+                        .url("$baseUrl/responses")
+                        .addHeader("Authorization", "Bearer $apiKey")
+                        .addHeader("Content-Type", "application/json")
+                        .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+                        .build()
+
+                    val respJson = httpClient.newCall(req).execute().use { resp ->
+                        val body = resp.body?.string() ?: ""
+                        if (!resp.isSuccessful) {
+                            throw IllegalStateException("Responses API HTTP ${resp.code}: ${body.take(200)}")
+                        }
+                        JSONObject(body)
+                    }
+
+                    val outputArr = respJson.optJSONArray("output") ?: JSONArray()
+                    val textParts = StringBuilder()
+                    for (i in 0 until outputArr.length()) {
+                        val item = outputArr.optJSONObject(i) ?: continue
+                        if (item.optString("type") == "message") {
+                            val contentArr = item.optJSONArray("content")
+                            if (contentArr != null) {
+                                for (j in 0 until contentArr.length()) {
+                                    val c = contentArr.optJSONObject(j) ?: continue
+                                    val t = c.optString("text", "")
+                                    if (t.isNotBlank()) {
+                                        if (textParts.isNotEmpty()) textParts.append("\n")
+                                        textParts.append(t)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    val extracted = textParts.toString().ifBlank { respJson.optString("output_text", "") }
+                    if (extracted.isBlank()) throw IllegalStateException("Empty Responses API output")
+                    extracted
                 }.getOrElse {
                     val msgs = JSONArray().apply {
                         put(JSONObject().apply {
