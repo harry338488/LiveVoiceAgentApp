@@ -150,42 +150,73 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
         liveSessionManager.setSpeakerphone(newSpeaker)
     }
 
-    fun setTranslationMode(enabled: Boolean) {
+    fun setAppMode(mode: AppMode) {
         val current = _uiState.value.settings
+        if (current.appMode == mode) return
         val wasConnected = _uiState.value.connectionState != ConnectionState.DISCONNECTED
-        val updated = if (enabled) {
-            current.copy(
+
+        val updated = when (mode) {
+            AppMode.TRANSLATE -> current.copy(
+                appMode = AppMode.TRANSLATE,
                 protocol = LiveProtocol.OPENAI_TRANSLATE,
                 frontendVoiceModel = "gpt-realtime-translate"
             )
-        } else {
-            val restoredVoiceModel = if (current.frontendVoiceModel.contains("translate")) {
-                "gpt-live-1"
-            } else {
-                current.frontendVoiceModel
+            AppMode.ASSISTANT, AppMode.TUTOR -> {
+                val restoredVoiceModel = if (current.frontendVoiceModel.lowercase().contains("translate")) {
+                    "gpt-live-1"
+                } else {
+                    current.frontendVoiceModel.ifBlank { "gpt-live-1" }
+                }
+                val restoredProtocol = when {
+                    restoredVoiceModel.lowercase().startsWith("grok") -> LiveProtocol.XAI_REALTIME
+                    restoredVoiceModel.lowercase().startsWith("gpt-live") -> LiveProtocol.OPENAI_LIVE
+                    else -> LiveProtocol.OPENAI_REALTIME
+                }
+                current.copy(
+                    appMode = mode,
+                    protocol = restoredProtocol,
+                    frontendVoiceModel = restoredVoiceModel
+                )
             }
-            val restoredProtocol = when {
-                restoredVoiceModel.lowercase().startsWith("grok") -> LiveProtocol.XAI_REALTIME
-                restoredVoiceModel.lowercase().startsWith("gpt-live") -> LiveProtocol.OPENAI_LIVE
-                else -> LiveProtocol.OPENAI_REALTIME
-            }
-            current.copy(
-                protocol = restoredProtocol,
-                frontendVoiceModel = restoredVoiceModel
-            )
         }
+
         updateSettings(updated)
         if (wasConnected) {
             liveSessionManager.disconnectImmediate()
             startLiveCall()
         } else {
-            val banner = if (enabled) {
-                "🌐 已切換至 gpt-realtime-translate 同步口譯模式（目標：${AppSettings.languageLabel(updated.translationTargetLanguage)}）"
-            } else {
-                "🎙️ 已切換至全雙工 AI 語音助理模式 (${updated.frontendVoiceModel} ⇄ ${updated.backendBrainModel})"
+            val banner = when (mode) {
+                AppMode.TRANSLATE ->
+                    "🌐 已切換至 gpt-realtime-translate 同步口譯模式（目標：${AppSettings.languageLabel(updated.translationTargetLanguage)}）"
+                AppMode.TUTOR ->
+                    "🎓 已切換至 AI 外語口說陪練（${AppSettings.tutorLanguageLabel(updated.tutorTargetLanguage)} · ${updated.tutorLevel.shortLabel} · ${updated.tutorScenario.shortLabel}）"
+                AppMode.ASSISTANT ->
+                    "🎙️ 已切換至全雙工 AI 語音助理模式 (${updated.frontendVoiceModel} ⇄ ${updated.backendBrainModel})"
             }
             _uiState.update { it.copy(statusBanner = banner) }
         }
+    }
+
+    fun setTranslationMode(enabled: Boolean) {
+        setAppMode(if (enabled) AppMode.TRANSLATE else AppMode.ASSISTANT)
+    }
+
+    fun updateTutorConfig(newSettings: AppSettings, restartScenarioGreeting: Boolean = false) {
+        updateSettings(newSettings)
+        liveSessionManager.updateTutorLiveSettings(newSettings)
+        if (restartScenarioGreeting && _uiState.value.connectionState != ConnectionState.DISCONNECTED) {
+            liveSessionManager.sendTutorQuickAction("start_scenario")
+        } else if (_uiState.value.connectionState == ConnectionState.DISCONNECTED && newSettings.appMode == AppMode.TUTOR) {
+            _uiState.update {
+                it.copy(
+                    statusBanner = "🎓 外語陪練就緒：${AppSettings.tutorLanguageLabel(newSettings.tutorTargetLanguage)} (${newSettings.tutorLevel.shortLabel} · ${newSettings.tutorScenario.shortLabel})"
+                )
+            }
+        }
+    }
+
+    fun triggerTutorQuickAction(actionType: String) {
+        liveSessionManager.sendTutorQuickAction(actionType)
     }
 
     fun setTranslationTargetLanguage(langCode: String) {
@@ -483,10 +514,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
                     val existingIdx = currentMsgs.indexOfLast {
                         turnIndex > 0 && it.turnIndex == turnIndex && it.role == MessageRole.ASSISTANT_VOICE
                     }
+                    val isReplace = streamKey.startsWith("tutor_coach_replace_")
                     if (existingIdx >= 0) {
                         val existing = currentMsgs[existingIdx]
                         currentMsgs[existingIdx] = existing.copy(
-                            backendThinkingText = existing.backendThinkingText + delta,
+                            backendThinkingText = if (isReplace) delta else existing.backendThinkingText + delta,
                             backendModelTag = modelTag.ifBlank { backModelName },
                             timestampMs = System.currentTimeMillis()
                         )

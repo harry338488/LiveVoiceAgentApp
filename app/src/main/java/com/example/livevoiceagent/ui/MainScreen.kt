@@ -77,6 +77,7 @@ private val GlassSurfaceBg = Color(0xFF1E293B).copy(alpha = 0.65f)
 private val CyanAccent = Color(0xFF38BDF8)
 private val VioletAccent = Color(0xFFA855F7)
 private val EmeraldAccent = Color(0xFF10B981)
+private val AmberTutorAccent = Color(0xFFF59E0B)
 private val RoseDanger = Color(0xFFF43F5E)
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -89,8 +90,9 @@ fun MainScreen(
     val context = LocalContext.current
     var selectedTab by remember { mutableIntStateOf(0) }
 
-    val isTranslationMode = uiState.settings.protocol == LiveProtocol.OPENAI_TRANSLATE ||
-            uiState.settings.frontendVoiceModel.lowercase().contains("translate")
+    val currentMode = uiState.settings.appMode
+    val isTranslationMode = currentMode == AppMode.TRANSLATE
+    val isTutorMode = currentMode == AppMode.TUTOR
 
     LaunchedEffect(uiState.errorToast) {
         uiState.errorToast?.let { msg ->
@@ -120,17 +122,21 @@ fun MainScreen(
                                 .clip(CircleShape)
                                 .background(
                                     Brush.linearGradient(
-                                        if (isTranslationMode) {
-                                            listOf(EmeraldAccent, CyanAccent)
-                                        } else {
-                                            listOf(CyanAccent, VioletAccent)
+                                        when {
+                                            isTutorMode -> listOf(AmberTutorAccent, VioletAccent)
+                                            isTranslationMode -> listOf(EmeraldAccent, CyanAccent)
+                                            else -> listOf(CyanAccent, VioletAccent)
                                         }
                                     )
                                 ),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
-                                imageVector = if (isTranslationMode) Icons.Default.Translate else Icons.Default.GraphicEq,
+                                imageVector = when {
+                                    isTutorMode -> Icons.Default.School
+                                    isTranslationMode -> Icons.Default.Translate
+                                    else -> Icons.Default.GraphicEq
+                                },
                                 contentDescription = null,
                                 tint = Color(0xFF06101E),
                                 modifier = Modifier.size(22.dp)
@@ -149,19 +155,30 @@ fun MainScreen(
                                 overflow = TextOverflow.Ellipsis
                             )
                             Spacer(modifier = Modifier.height(2.dp))
-                            val subtitleText = if (isTranslationMode) {
-                                "gpt-realtime-translate • 70+ 語言自動偵測 ➔ ${
-                                    AppSettings.languageLabel(uiState.settings.translationTargetLanguage)
-                                }"
-                            } else {
-                                "${uiState.settings.frontendVoiceModel} ⇄ ${uiState.settings.backendBrainModel}" +
-                                        (if (uiState.settings.linkupSearchEnabled) " · Linkup" else "") +
-                                        (if (uiState.settings.calendarToolsEnabled) " · 行事曆" else "")
+                            val subtitleText = when {
+                                isTutorMode -> {
+                                    val langShort = AppSettings.tutorLanguageLabel(uiState.settings.tutorTargetLanguage).substringBefore(" (")
+                                    "🎓 外語陪練：$langShort · ${uiState.settings.tutorLevel.shortLabel} · ${uiState.settings.tutorScenario.shortLabel}"
+                                }
+                                isTranslationMode -> {
+                                    "gpt-realtime-translate • 70+ 語言自動偵測 ➔ ${
+                                        AppSettings.languageLabel(uiState.settings.translationTargetLanguage)
+                                    }"
+                                }
+                                else -> {
+                                    "${uiState.settings.frontendVoiceModel} ⇄ ${uiState.settings.backendBrainModel}" +
+                                            (if (uiState.settings.linkupSearchEnabled) " · Linkup" else "") +
+                                            (if (uiState.settings.calendarToolsEnabled) " · 行事曆" else "")
+                                }
                             }
                             Text(
                                 text = subtitleText,
                                 style = MaterialTheme.typography.labelSmall,
-                                color = if (isTranslationMode) EmeraldAccent else CyanAccent,
+                                color = when {
+                                    isTutorMode -> AmberTutorAccent
+                                    isTranslationMode -> EmeraldAccent
+                                    else -> CyanAccent
+                                },
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
@@ -199,20 +216,37 @@ fun MainScreen(
                 containerColor = Color(0xFF0B1120).copy(alpha = 0.96f),
                 tonalElevation = 0.dp
             ) {
+                val navTab0Accent = when {
+                    isTutorMode -> AmberTutorAccent
+                    isTranslationMode -> EmeraldAccent
+                    else -> CyanAccent
+                }
                 NavigationBarItem(
                     selected = selectedTab == 0,
                     onClick = { selectedTab = 0 },
                     icon = {
                         Icon(
-                            if (isTranslationMode) Icons.Default.Translate else Icons.Default.GraphicEq,
+                            when {
+                                isTutorMode -> Icons.Default.School
+                                isTranslationMode -> Icons.Default.Translate
+                                else -> Icons.Default.GraphicEq
+                            },
                             contentDescription = null
                         )
                     },
-                    label = { Text(if (isTranslationMode) "即時同步口譯" else "即時語音對話") },
+                    label = {
+                        Text(
+                            when {
+                                isTutorMode -> "外語口說陪練"
+                                isTranslationMode -> "即時同步口譯"
+                                else -> "即時語音對話"
+                            }
+                        )
+                    },
                     colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = if (isTranslationMode) EmeraldAccent else CyanAccent,
-                        selectedTextColor = if (isTranslationMode) EmeraldAccent else CyanAccent,
-                        indicatorColor = (if (isTranslationMode) EmeraldAccent else CyanAccent).copy(alpha = 0.16f)
+                        selectedIconColor = navTab0Accent,
+                        selectedTextColor = navTab0Accent,
+                        indicatorColor = navTab0Accent.copy(alpha = 0.16f)
                     )
                 )
                 NavigationBarItem(
@@ -261,11 +295,15 @@ fun MainScreen(
             when (selectedTab) {
                 0 -> LiveConversationTab(
                     uiState = uiState,
-                    isTranslationMode = isTranslationMode,
-                    onSelectTranslationMode = { viewModel.setTranslationMode(it) },
+                    currentMode = currentMode,
+                    onSelectAppMode = { viewModel.setAppMode(it) },
                     onSelectTargetLanguage = { viewModel.setTranslationTargetLanguage(it) },
                     onSelectSecondaryLanguage = { viewModel.setTranslationSecondaryLanguage(it) },
                     onUpdateSettings = { viewModel.updateSettings(it) },
+                    onUpdateTutorConfig = { newSettings, restartGreeting ->
+                        viewModel.updateTutorConfig(newSettings, restartGreeting)
+                    },
+                    onTriggerTutorQuickAction = { viewModel.triggerTutorQuickAction(it) },
                     onToggleCall = onRequestMicPermissionAndToggleCall,
                     onToggleMute = { viewModel.toggleMute() },
                     onToggleSpeaker = { viewModel.toggleSpeakerphone() },
@@ -300,11 +338,13 @@ fun MainScreen(
 @Composable
 private fun LiveConversationTab(
     uiState: UiState,
-    isTranslationMode: Boolean,
-    onSelectTranslationMode: (Boolean) -> Unit,
+    currentMode: AppMode,
+    onSelectAppMode: (AppMode) -> Unit,
     onSelectTargetLanguage: (String) -> Unit,
     onSelectSecondaryLanguage: (String) -> Unit,
     onUpdateSettings: (AppSettings) -> Unit,
+    onUpdateTutorConfig: (AppSettings, Boolean) -> Unit,
+    onTriggerTutorQuickAction: (String) -> Unit,
     onToggleCall: () -> Unit,
     onToggleMute: () -> Unit,
     onToggleSpeaker: () -> Unit,
@@ -315,22 +355,24 @@ private fun LiveConversationTab(
     var typedInput by remember { mutableStateOf("") }
     var showKeyboardBar by remember { mutableStateOf(false) }
 
+    val isTranslationMode = currentMode == AppMode.TRANSLATE
+    val isTutorMode = currentMode == AppMode.TUTOR
     val messages = uiState.currentSession.messages
 
-    LaunchedEffect(messages.size, messages.lastOrNull()?.text?.length) {
+    LaunchedEffect(messages.size, messages.lastOrNull()?.text?.length, messages.lastOrNull()?.backendThinkingText?.length) {
         if (messages.isNotEmpty()) {
             listState.animateScrollToItem(messages.lastIndex)
         }
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        // 1. Top Segmented Mode Switcher: [🎙️ 全雙工 AI 語音助理] vs [🌐 即時同步口譯]
+        // 1. Top 3-Way Segmented Mode Switcher: [🎙️ 語音助理] | [🌐 同步口譯] | [🎓 外語陪練]
         ModeSegmentedSwitcher(
-            isTranslationMode = isTranslationMode,
-            onSelectTranslationMode = onSelectTranslationMode
+            currentMode = currentMode,
+            onSelectAppMode = onSelectAppMode
         )
 
-        // 2. If in Translation Mode, show the sleek, human-friendly Output Language Console & Glossary/Prompt button
+        // 2A. If in Translation Mode, show Output Language Console & Glossary/Prompt button
         AnimatedVisibility(
             visible = isTranslationMode,
             enter = expandVertically() + fadeIn(),
@@ -344,11 +386,25 @@ private fun LiveConversationTab(
             )
         }
 
+        // 2B. If in Language Tutor Mode, show the Language, Proficiency Level, Roleplay Scenario & Live Coach Console!
+        AnimatedVisibility(
+            visible = isTutorMode,
+            enter = expandVertically() + fadeIn(),
+            exit = shrinkVertically() + fadeOut()
+        ) {
+            LanguageTutorControlBar(
+                settings = uiState.settings,
+                isConnected = uiState.connectionState != ConnectionState.DISCONNECTED,
+                onUpdateTutorConfig = onUpdateTutorConfig,
+                onTriggerTutorQuickAction = onTriggerTutorQuickAction
+            )
+        }
+
         // 3. Compact Status & Live Waveform Pill (always visible when chatting)
         if (messages.isNotEmpty()) {
             CompactVoiceOrbStatusCard(
                 uiState = uiState,
-                isTranslationMode = isTranslationMode
+                currentMode = currentMode
             )
         }
 
@@ -363,7 +419,7 @@ private fun LiveConversationTab(
             ) {
                 AnimatedVoiceOrbHero(
                     uiState = uiState,
-                    isTranslationMode = isTranslationMode,
+                    currentMode = currentMode,
                     onTapOrb = onToggleCall
                 )
             }
@@ -396,7 +452,7 @@ private fun LiveConversationTab(
         // 5. Floating Glassmorphic Bottom Control Dock
         FloatingBottomControlDock(
             uiState = uiState,
-            isTranslationMode = isTranslationMode,
+            currentMode = currentMode,
             typedInput = typedInput,
             onTypedInputChange = { typedInput = it },
             showKeyboardBar = showKeyboardBar,
@@ -416,13 +472,13 @@ private fun LiveConversationTab(
 
 @Composable
 private fun ModeSegmentedSwitcher(
-    isTranslationMode: Boolean,
-    onSelectTranslationMode: (Boolean) -> Unit
+    currentMode: AppMode,
+    onSelectAppMode: (AppMode) -> Unit
 ) {
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 14.dp, vertical = 8.dp),
+            .padding(horizontal = 14.dp, vertical = 6.dp),
         shape = RoundedCornerShape(50),
         color = Color(0xFF131C2E).copy(alpha = 0.9f),
         border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f))
@@ -434,7 +490,7 @@ private fun ModeSegmentedSwitcher(
             verticalAlignment = Alignment.CenterVertically
         ) {
             // Pill 1: AI Voice Assistant
-            val assistantSelected = !isTranslationMode
+            val assistantSelected = currentMode == AppMode.ASSISTANT
             Box(
                 modifier = Modifier
                     .weight(1f)
@@ -453,7 +509,7 @@ private fun ModeSegmentedSwitcher(
                         color = if (assistantSelected) CyanAccent.copy(alpha = 0.6f) else Color.Transparent,
                         shape = RoundedCornerShape(50)
                     )
-                    .clickable { if (isTranslationMode) onSelectTranslationMode(false) }
+                    .clickable { onSelectAppMode(AppMode.ASSISTANT) }
                     .padding(vertical = 9.dp),
                 contentAlignment = Alignment.Center
             ) {
@@ -462,11 +518,11 @@ private fun ModeSegmentedSwitcher(
                         imageVector = Icons.Default.AutoAwesome,
                         contentDescription = null,
                         tint = if (assistantSelected) CyanAccent else Color(0xFF94A3B8),
-                        modifier = Modifier.size(16.dp)
+                        modifier = Modifier.size(15.dp)
                     )
-                    Spacer(modifier = Modifier.width(6.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
                     Text(
-                        text = "全雙工 AI 語音助理",
+                        text = "語音助理",
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = if (assistantSelected) FontWeight.Bold else FontWeight.Medium,
                         color = if (assistantSelected) Color.White else Color(0xFF94A3B8)
@@ -475,7 +531,7 @@ private fun ModeSegmentedSwitcher(
             }
 
             // Pill 2: Live Translation (`gpt-realtime-translate`)
-            val translateSelected = isTranslationMode
+            val translateSelected = currentMode == AppMode.TRANSLATE
             Box(
                 modifier = Modifier
                     .weight(1f)
@@ -494,7 +550,7 @@ private fun ModeSegmentedSwitcher(
                         color = if (translateSelected) EmeraldAccent.copy(alpha = 0.65f) else Color.Transparent,
                         shape = RoundedCornerShape(50)
                     )
-                    .clickable { if (!isTranslationMode) onSelectTranslationMode(true) }
+                    .clickable { onSelectAppMode(AppMode.TRANSLATE) }
                     .padding(vertical = 9.dp),
                 contentAlignment = Alignment.Center
             ) {
@@ -503,18 +559,371 @@ private fun ModeSegmentedSwitcher(
                         imageVector = Icons.Default.Translate,
                         contentDescription = null,
                         tint = if (translateSelected) EmeraldAccent else Color(0xFF94A3B8),
-                        modifier = Modifier.size(16.dp)
+                        modifier = Modifier.size(15.dp)
                     )
-                    Spacer(modifier = Modifier.width(6.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
                     Text(
-                        text = "即時同步口譯",
+                        text = "同步口譯",
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = if (translateSelected) FontWeight.Bold else FontWeight.Medium,
                         color = if (translateSelected) Color.White else Color(0xFF94A3B8)
                     )
                 }
             }
+
+            // Pill 3: AI Language Tutor (`🎓 外語陪練`)
+            val tutorSelected = currentMode == AppMode.TUTOR
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(50))
+                    .background(
+                        if (tutorSelected) {
+                            Brush.horizontalGradient(
+                                listOf(AmberTutorAccent.copy(alpha = 0.30f), VioletAccent.copy(alpha = 0.25f))
+                            )
+                        } else {
+                            Brush.horizontalGradient(listOf(Color.Transparent, Color.Transparent))
+                        }
+                    )
+                    .border(
+                        width = if (tutorSelected) 1.dp else 0.dp,
+                        color = if (tutorSelected) AmberTutorAccent.copy(alpha = 0.70f) else Color.Transparent,
+                        shape = RoundedCornerShape(50)
+                    )
+                    .clickable { onSelectAppMode(AppMode.TUTOR) }
+                    .padding(vertical = 9.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.School,
+                        contentDescription = null,
+                        tint = if (tutorSelected) AmberTutorAccent else Color(0xFF94A3B8),
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "外語陪練",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = if (tutorSelected) FontWeight.Bold else FontWeight.Medium,
+                        color = if (tutorSelected) Color.White else Color(0xFF94A3B8)
+                    )
+                }
+            }
         }
+    }
+}
+
+@Composable
+private fun LanguageTutorControlBar(
+    settings: AppSettings,
+    isConnected: Boolean,
+    onUpdateTutorConfig: (AppSettings, Boolean) -> Unit,
+    onTriggerTutorQuickAction: (String) -> Unit
+) {
+    val langScroll = rememberScrollState()
+    val scenarioScroll = rememberScrollState()
+    var showCustomScenarioDialog by remember { mutableStateOf(false) }
+
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp, vertical = 4.dp),
+        shape = RoundedCornerShape(18.dp),
+        color = Color(0xFF1A172B).copy(alpha = 0.94f),
+        border = BorderStroke(1.dp, AmberTutorAccent.copy(alpha = 0.42f))
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+            // 1. Header + Auto-Coach Toggle Pill
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "🎓 雙腦外語口說家教 (支援中日/中英混講卡詞救星)",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+                    Text(
+                        text = "不會講的單字直接夾雜中文說！後端自動生成假名標音・糾錯・下一句提示",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFFCBD5E1)
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(6.dp))
+
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = if (settings.tutorAutoCoachEnabled) AmberTutorAccent.copy(alpha = 0.22f) else Color(0xFF1E293B),
+                    border = BorderStroke(
+                        1.dp,
+                        if (settings.tutorAutoCoachEnabled) AmberTutorAccent else Color.White.copy(alpha = 0.15f)
+                    ),
+                    modifier = Modifier.clickable {
+                        onUpdateTutorConfig(
+                            settings.copy(tutorAutoCoachEnabled = !settings.tutorAutoCoachEnabled),
+                            false
+                        )
+                    }
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = if (settings.tutorAutoCoachEnabled) "📖 假名/糾錯卡: 開" else "📖 假名/糾錯卡: 關",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = if (settings.tutorAutoCoachEnabled) Color(0xFFFDE68A) else Color(0xFF94A3B8)
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // 2. Target Learning Language Horizontal Chips
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(langScroll),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                AppSettings.AVAILABLE_TUTOR_LANGUAGES.forEach { (code, label) ->
+                    val selected = settings.tutorTargetLanguage == code
+                    val shortName = label.substringBefore(" (")
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = if (selected) AmberTutorAccent.copy(alpha = 0.25f) else Color(0xFF141E30),
+                        border = BorderStroke(
+                            1.dp,
+                            if (selected) AmberTutorAccent else Color.White.copy(alpha = 0.08f)
+                        ),
+                        modifier = Modifier.clickable {
+                            if (!selected) {
+                                onUpdateTutorConfig(settings.copy(tutorTargetLanguage = code), true)
+                            }
+                        }
+                    ) {
+                        Text(
+                            text = shortName,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                            color = if (selected) Color.White else Color(0xFF94A3B8),
+                            modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp)
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // 3. Proficiency Level Selector (Beginner N5-N4 / Intermediate N3-N2 / Advanced N1)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                TutorLevel.entries.forEach { level ->
+                    val selected = settings.tutorLevel == level
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = if (selected) VioletAccent.copy(alpha = 0.25f) else Color(0xFF141E30),
+                        border = BorderStroke(
+                            1.dp,
+                            if (selected) VioletAccent else Color.White.copy(alpha = 0.08f)
+                        ),
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable {
+                                if (!selected) {
+                                    onUpdateTutorConfig(settings.copy(tutorLevel = level), false)
+                                }
+                            }
+                    ) {
+                        Text(
+                            text = level.shortLabel,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                            color = if (selected) Color(0xFFF3E8FF) else Color(0xFF94A3B8),
+                            textAlign = TextAlign.Center,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 6.dp)
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // 4. Roleplay Scenario Selector Chips
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(scenarioScroll),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TutorScenario.entries.forEach { scenario ->
+                    val selected = settings.tutorScenario == scenario
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = if (selected) CyanAccent.copy(alpha = 0.22f) else Color(0xFF141E30),
+                        border = BorderStroke(
+                            1.dp,
+                            if (selected) CyanAccent else Color.White.copy(alpha = 0.08f)
+                        ),
+                        modifier = Modifier.clickable {
+                            if (scenario == TutorScenario.CUSTOM) {
+                                showCustomScenarioDialog = true
+                            } else {
+                                onUpdateTutorConfig(settings.copy(tutorScenario = scenario), true)
+                            }
+                        }
+                    ) {
+                        Text(
+                            text = if (scenario == TutorScenario.CUSTOM && settings.tutorCustomScenarioPrompt.isNotBlank()) {
+                                "✨ 自訂: ${settings.tutorCustomScenarioPrompt.take(8)}..."
+                            } else {
+                                scenario.shortLabel
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                            color = if (selected) Color.White else Color(0xFFCBD5E1),
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                        )
+                    }
+                }
+            }
+
+            // 5. Live In-Call Helper Buttons (only visible while connected in Tutor mode)
+            if (isConnected) {
+                Spacer(modifier = Modifier.height(8.dp))
+                HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = AmberTutorAccent.copy(alpha = 0.18f),
+                        border = BorderStroke(1.dp, AmberTutorAccent.copy(alpha = 0.45f)),
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable { onTriggerTutorQuickAction("start_scenario") }
+                    ) {
+                        Text(
+                            text = "🎬 AI 先開口",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFFFDE68A),
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(vertical = 6.dp)
+                        )
+                    }
+
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = CyanAccent.copy(alpha = 0.18f),
+                        border = BorderStroke(1.dp, CyanAccent.copy(alpha = 0.45f)),
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable { onTriggerTutorQuickAction("repeat_slowly") }
+                    ) {
+                        Text(
+                            text = "🐢 慢速再說一次",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFFBAE6FD),
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(vertical = 6.dp)
+                        )
+                    }
+
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = VioletAccent.copy(alpha = 0.20f),
+                        border = BorderStroke(1.dp, VioletAccent.copy(alpha = 0.45f)),
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable { onTriggerTutorQuickAction("give_hint") }
+                    ) {
+                        Text(
+                            text = "💡 提示我怎麼回",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFFE9D5FF),
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(vertical = 6.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    if (showCustomScenarioDialog) {
+        var customDraft by remember(settings.tutorCustomScenarioPrompt) {
+            mutableStateOf(settings.tutorCustomScenarioPrompt)
+        }
+        AlertDialog(
+            onDismissRequest = { showCustomScenarioDialog = false },
+            containerColor = Color(0xFF111827),
+            titleContentColor = Color.White,
+            textContentColor = Color(0xFFCBD5E1),
+            title = {
+                Text("✨ 自訂外語口說演練情境", fontWeight = FontWeight.Bold)
+            },
+            text = {
+                Column {
+                    Text(
+                        "請輸入你想讓 AI 扮演的角色與對話場景（例如：「你是日本藥妝店員，我要找止痛藥跟問退稅」、「你是日本房東，我要詢問租屋細節」）：",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFF94A3B8)
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = customDraft,
+                        onValueChange = { customDraft = it },
+                        placeholder = { Text("輸入自訂角色與情境...", color = Color(0xFF64748B)) },
+                        minLines = 3,
+                        maxLines = 5,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onUpdateTutorConfig(
+                            settings.copy(
+                                tutorScenario = TutorScenario.CUSTOM,
+                                tutorCustomScenarioPrompt = customDraft.trim()
+                            ),
+                            true
+                        )
+                        showCustomScenarioDialog = false
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = AmberTutorAccent,
+                        contentColor = Color(0xFF06101E)
+                    )
+                ) {
+                    Text("套用並開始情境", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCustomScenarioDialog = false }) {
+                    Text("取消", color = Color(0xFF94A3B8))
+                }
+            }
+        )
     }
 }
 
@@ -1022,7 +1431,7 @@ private fun CustomGlossaryAndPromptDialog(
 @Composable
 private fun AnimatedVoiceOrbHero(
     uiState: UiState,
-    isTranslationMode: Boolean,
+    currentMode: AppMode,
     onTapOrb: () -> Unit
 ) {
     val infiniteTransition = rememberInfiniteTransition(label = "orbTransition")
@@ -1045,20 +1454,25 @@ private fun AnimatedVoiceOrbHero(
         label = "orbBreathe"
     )
 
+    val isTranslationMode = currentMode == AppMode.TRANSLATE
+    val isTutorMode = currentMode == AppMode.TUTOR
     val isConnected = uiState.connectionState != ConnectionState.DISCONNECTED
     val isDelegating = uiState.connectionState == ConnectionState.DELEGATING
     val dynamicLevel = uiState.micLevel.coerceIn(0f, 1f)
 
     val primaryOrbColor = when {
         isDelegating -> VioletAccent
+        isTutorMode && isConnected -> AmberTutorAccent
         isTranslationMode && isConnected -> EmeraldAccent
         isConnected -> CyanAccent
+        isTutorMode -> AmberTutorAccent.copy(alpha = 0.82f)
         isTranslationMode -> EmeraldAccent.copy(alpha = 0.78f)
         else -> CyanAccent.copy(alpha = 0.78f)
     }
 
     val secondaryOrbColor = when {
         isDelegating -> Color(0xFFEC4899)
+        isTutorMode -> VioletAccent
         isTranslationMode -> CyanAccent
         else -> VioletAccent
     }
@@ -1137,6 +1551,7 @@ private fun AnimatedVoiceOrbHero(
 
             Icon(
                 imageVector = when {
+                    isTutorMode -> Icons.Default.School
                     isConnected && isTranslationMode -> Icons.Default.Translate
                     isConnected -> Icons.Default.GraphicEq
                     isTranslationMode -> Icons.Default.Translate
@@ -1180,10 +1595,10 @@ private fun AnimatedVoiceOrbHero(
         Spacer(modifier = Modifier.height(16.dp))
 
         Text(
-            text = if (isTranslationMode) {
-                "🌐 即時雙向同步口譯 (gpt-realtime-translate)"
-            } else {
-                "🎙️ 全雙工多語言語音助理 + 後端推理大腦"
+            text = when {
+                isTutorMode -> "🎓 雙腦 AI 外語口說陪練家教 (${AppSettings.tutorLanguageLabel(uiState.settings.tutorTargetLanguage)})"
+                isTranslationMode -> "🌐 即時雙向同步口譯 (gpt-realtime-translate)"
+                else -> "🎙️ 全雙工多語言語音助理 + 後端推理大腦"
             },
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.Bold,
@@ -1193,14 +1608,19 @@ private fun AnimatedVoiceOrbHero(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        val featureSummary = if (isTranslationMode) {
-            "• 支援中、英、日、韓、歐美與東南亞等 70+ 種語言自動聽音辨識\n" +
-                    "• 邊聽邊翻無需等待回合，自動模仿說話者音色語氣輸出目標語言\n" +
-                    "• 點擊上方「⇄」按鈕可在通話中即時切換雙向口譯目標語言！"
-        } else {
-            "• 支援中、英、日文自然混講（自動保留日文漢字與假名、中文轉繁體）\n" +
-                    "• 前台語音 (${uiState.settings.frontendVoiceModel}) 毫秒級回應，查資料時仍可繼續聊天\n" +
-                    "• 後端大腦 (${uiState.settings.backendBrainModel}) 思考過程、Linkup 搜尋與行事曆收折於氣泡抽屜中"
+        val featureSummary = when {
+            isTutorMode ->
+                "• 開始通話後 AI 會主動開口打招呼！不會說的單字可直接用中文混著講\n" +
+                        "• 前台 (${uiState.settings.frontendVoiceModel}) 負責自然外語對答與角色扮演，絕不打斷對話節奏\n" +
+                        "• 後端 (${uiState.settings.backendBrainModel}) 自動在氣泡附上「漢字平假名標音、中譯、文法微調與下一句跟讀提示」"
+            isTranslationMode ->
+                "• 支援中、英、日、韓、歐美與東南亞等 70+ 種語言自動聽音辨識\n" +
+                        "• 邊聽邊翻無需等待回合，自動模仿說話者音色語氣輸出目標語言\n" +
+                        "• 點擊上方固定雙語按鈕可在通話中一鍵切換手機播出的目標語言！"
+            else ->
+                "• 支援中、英、日文自然混講（自動保留日文漢字與假名、中文轉繁體）\n" +
+                        "• 前台語音 (${uiState.settings.frontendVoiceModel}) 毫秒級回應，查資料時仍可繼續聊天\n" +
+                        "• 後端大腦 (${uiState.settings.backendBrainModel}) 思考過程、Linkup 搜尋與行事曆收折於氣泡抽屜中"
         }
 
         Text(
@@ -1217,7 +1637,7 @@ private fun AnimatedVoiceOrbHero(
 @Composable
 private fun CompactVoiceOrbStatusCard(
     uiState: UiState,
-    isTranslationMode: Boolean
+    currentMode: AppMode
 ) {
     val infiniteTransition = rememberInfiniteTransition(label = "compactWave")
     val wavePhase by infiniteTransition.animateFloat(
@@ -1235,7 +1655,11 @@ private fun CompactVoiceOrbStatusCard(
         ConnectionState.DISCONNECTED -> Color(0xFF64748B)
         ConnectionState.CONNECTING, ConnectionState.CLOSING -> Color(0xFFF59E0B)
         ConnectionState.DELEGATING -> VioletAccent
-        ConnectionState.LIVE -> if (isTranslationMode) EmeraldAccent else CyanAccent
+        ConnectionState.LIVE -> when (currentMode) {
+            AppMode.TUTOR -> AmberTutorAccent
+            AppMode.TRANSLATE -> EmeraldAccent
+            AppMode.ASSISTANT -> CyanAccent
+        }
     }
 
     Surface(
@@ -1315,7 +1739,7 @@ private fun CompactVoiceOrbStatusCard(
 @Composable
 private fun FloatingBottomControlDock(
     uiState: UiState,
-    isTranslationMode: Boolean,
+    currentMode: AppMode,
     typedInput: String,
     onTypedInputChange: (String) -> Unit,
     showKeyboardBar: Boolean,
@@ -1326,6 +1750,8 @@ private fun FloatingBottomControlDock(
     onSendTypedMessage: () -> Unit
 ) {
     val isConnected = uiState.connectionState != ConnectionState.DISCONNECTED
+    val isTranslationMode = currentMode == AppMode.TRANSLATE
+    val isTutorMode = currentMode == AppMode.TUTOR
 
     Column(
         modifier = Modifier
@@ -1460,9 +1886,10 @@ private fun FloatingBottomControlDock(
                     }
                 }
 
-                // Centerpiece: Glowing Call / Interpret Pill Button
+                // Centerpiece: Glowing Call / Interpret / Tutor Pill Button
                 val mainBtnBrush = when {
                     isConnected -> Brush.horizontalGradient(listOf(RoseDanger, Color(0xFFE11D48)))
+                    isTutorMode -> Brush.horizontalGradient(listOf(AmberTutorAccent, VioletAccent))
                     isTranslationMode -> Brush.horizontalGradient(listOf(EmeraldAccent, CyanAccent))
                     else -> Brush.horizontalGradient(listOf(CyanAccent, Color(0xFF6366F1)))
                 }
@@ -1479,6 +1906,7 @@ private fun FloatingBottomControlDock(
                         Icon(
                             imageVector = when {
                                 isConnected -> Icons.Default.CallEnd
+                                isTutorMode -> Icons.Default.School
                                 isTranslationMode -> Icons.Default.Translate
                                 else -> Icons.Default.GraphicEq
                             },
@@ -1489,8 +1917,10 @@ private fun FloatingBottomControlDock(
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
                             text = when {
+                                isConnected && isTutorMode -> "結束外語陪練"
                                 isConnected && isTranslationMode -> "停止同步口譯"
                                 isConnected -> "結束語音通話"
+                                isTutorMode -> "開始外語口說陪練"
                                 isTranslationMode -> "開始同步口譯"
                                 else -> "開始全雙工對話"
                             },
@@ -1539,12 +1969,19 @@ private fun ChatMessageItem(
 
     val isUser = message.role == MessageRole.USER
     val isTranslationBubble = message.modelTag.contains("口譯")
+    val isTutorBubble = message.modelTag.contains("家教") || message.backendModelTag.contains("家教")
     val isLegacyCollapsibleNote = message.role == MessageRole.BACKEND_BRAIN || message.role == MessageRole.WEB_SEARCH
-    var isThinkingExpanded by remember(message.id) { mutableStateOf(false) }
+    // Auto-expand the Tutor Coach card so the user immediately sees Furigana readings, translation & next reply hints!
+    var isThinkingExpanded by remember(message.id, isTutorBubble) { mutableStateOf(isTutorBubble) }
 
     val roleLabel = when {
-        isUser -> if (message.modelTag.contains("原音")) "🎙️ 原音辨識" else "🗣️ 你"
+        isUser -> when {
+            message.modelTag.contains("原音") -> "🎙️ 原音辨識"
+            message.modelTag.contains("口說") -> "🗣️ 你的口說練習"
+            else -> "🗣️ 你"
+        }
         isTranslationBubble -> message.modelTag
+        isTutorBubble && message.role == MessageRole.ASSISTANT_VOICE -> message.modelTag
         message.role == MessageRole.ASSISTANT_VOICE -> "🎧 ${message.modelTag.ifBlank { "AI 語音" }}"
         message.role == MessageRole.BACKEND_BRAIN -> "🧠 後端模型重點筆記 (${message.modelTag})"
         message.role == MessageRole.WEB_SEARCH -> "🌐 Linkup 網路搜尋 (${message.sources.size} 筆)"
@@ -1553,6 +1990,7 @@ private fun ChatMessageItem(
 
     val roleAccentColor = when {
         isUser -> Color(0xFF93C5FD)
+        isTutorBubble -> AmberTutorAccent
         isTranslationBubble -> EmeraldAccent
         message.role == MessageRole.ASSISTANT_VOICE -> CyanAccent
         else -> VioletAccent
@@ -1590,6 +2028,10 @@ private fun ChatMessageItem(
                     brush = if (isUser) {
                         Brush.linearGradient(
                             listOf(Color(0xFF60A5FA).copy(alpha = 0.45f), Color.Transparent)
+                        )
+                    } else if (isTutorBubble) {
+                        Brush.linearGradient(
+                            listOf(AmberTutorAccent.copy(alpha = 0.50f), VioletAccent.copy(alpha = 0.25f))
                         )
                     } else if (isTranslationBubble) {
                         Brush.linearGradient(
@@ -1644,13 +2086,17 @@ private fun ChatMessageItem(
                     )
                 }
 
-                // Embedded Perplexity / DeepSeek R1 style "Thinking Mode" collapsible drawer
+                // Embedded Perplexity / DeepSeek R1 style "Thinking Mode" or "Language Tutor Coach" collapsible drawer
                 if (message.hasThinkingDetails) {
                     Spacer(modifier = Modifier.height(8.dp))
 
                     val summaryBadges = buildList {
                         if (message.backendThinkingText.isNotBlank()) {
-                            add("🧠 ${message.backendModelTag.ifBlank { "後端推理" }}")
+                            if (isTutorBubble) {
+                                add("📖 假名標音・中譯・口說糾錯・下一句提示")
+                            } else {
+                                add("🧠 ${message.backendModelTag.ifBlank { "後端推理" }}")
+                            }
                         }
                         if (message.searchQueriesAndSummaries.isNotEmpty() || message.sources.isNotEmpty()) {
                             val count = maxOf(message.searchQueriesAndSummaries.size, 1)
@@ -1661,10 +2107,12 @@ private fun ChatMessageItem(
                         }
                     }.joinToString(" · ")
 
+                    val drawerAccent = if (isTutorBubble) AmberTutorAccent else VioletAccent
+
                     Surface(
                         shape = RoundedCornerShape(12.dp),
-                        color = Color(0xFF090E1A).copy(alpha = 0.72f),
-                        border = BorderStroke(1.dp, VioletAccent.copy(alpha = 0.35f)),
+                        color = Color(0xFF090E1A).copy(alpha = 0.78f),
+                        border = BorderStroke(1.dp, drawerAccent.copy(alpha = 0.42f)),
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable { isThinkingExpanded = !isThinkingExpanded }
@@ -1675,9 +2123,9 @@ private fun ChatMessageItem(
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Icon(
-                                    imageVector = Icons.Default.Psychology,
+                                    imageVector = if (isTutorBubble) Icons.Default.School else Icons.Default.Psychology,
                                     contentDescription = null,
-                                    tint = VioletAccent,
+                                    tint = drawerAccent,
                                     modifier = Modifier.size(16.dp)
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
@@ -1685,7 +2133,7 @@ private fun ChatMessageItem(
                                     text = summaryBadges.ifBlank { "思考過程與背景重點" },
                                     style = MaterialTheme.typography.labelSmall,
                                     fontWeight = FontWeight.SemiBold,
-                                    color = Color(0xFFE9D5FF),
+                                    color = if (isTutorBubble) Color(0xFFFDE68A) else Color(0xFFE9D5FF),
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                     modifier = Modifier.weight(1f)
@@ -1695,7 +2143,7 @@ private fun ChatMessageItem(
                                     text = if (isThinkingExpanded) "收合 ▲" else "展開詳情 ▼",
                                     style = MaterialTheme.typography.labelSmall,
                                     fontWeight = FontWeight.Bold,
-                                    color = VioletAccent
+                                    color = drawerAccent
                                 )
                             }
 
@@ -2140,7 +2588,12 @@ private fun SettingsAndModelFetchTab(
                         } else {
                             s.frontendVoiceModel
                         }
-                        onUpdateSettings(s.copy(protocol = picked, frontendVoiceModel = autoModel))
+                        val autoAppMode = when {
+                            picked == LiveProtocol.OPENAI_TRANSLATE -> AppMode.TRANSLATE
+                            s.appMode == AppMode.TRANSLATE -> AppMode.ASSISTANT
+                            else -> s.appMode
+                        }
+                        onUpdateSettings(s.copy(protocol = picked, frontendVoiceModel = autoModel, appMode = autoAppMode))
                     }
                 )
 
@@ -2156,7 +2609,12 @@ private fun SettingsAndModelFetchTab(
                             modelId.lowercase().startsWith("gpt-live") -> LiveProtocol.OPENAI_LIVE
                             else -> s.protocol
                         }
-                        onUpdateSettings(s.copy(frontendVoiceModel = modelId, protocol = autoProtocol))
+                        val autoAppMode = when {
+                            autoProtocol == LiveProtocol.OPENAI_TRANSLATE -> AppMode.TRANSLATE
+                            s.appMode == AppMode.TRANSLATE -> AppMode.ASSISTANT
+                            else -> s.appMode
+                        }
+                        onUpdateSettings(s.copy(frontendVoiceModel = modelId, protocol = autoProtocol, appMode = autoAppMode))
                     }
                 )
 

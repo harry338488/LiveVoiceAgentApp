@@ -478,6 +478,109 @@ class BackendLlmClient(
         }.getOrNull()
     }
 
+    /**
+     * Silently analyzes a language-learning conversation turn in the background using the Backend Brain LLM.
+     * Produces Furigana/pronunciation readings, Traditional Chinese translation, gentle grammar/naturalness
+     * coaching on the user's utterance, key vocabulary, and 2 ready-to-read next-turn reply suggestions!
+     */
+    suspend fun generateTutorCoachNotes(
+        settings: AppSettings,
+        userUtterance: String,
+        aiUtterance: String
+    ): Result<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            val (baseUrl, apiKey, model) = resolveBackendCredentials(settings)
+            val langLabel = AppSettings.tutorLanguageLabel(settings.tutorTargetLanguage)
+            val levelLabel = settings.tutorLevel.shortLabel
+            val isJapanese = settings.tutorTargetLanguage == "ja"
+
+            val readingInstruction = if (isJapanese) {
+                "請將 AI 原句中的所有日文漢字後方加上括號標註平假名讀音（例如：今日(きょう)は何(なに)を食(た)べたいですか？），切勿遺漏任何漢字讀音！"
+            } else {
+                "請標註重點連音、重音或發音提示，幫助學習者正確跟讀。"
+            }
+
+            val systemPrompt = buildString {
+                appendLine("你是專業、親切的【$langLabel】口說家教後端教練（學生程度：$levelLabel）。")
+                appendLine("請針對剛才這一輪「使用者說的話」與「AI 陪練員的回覆」，用台灣繁體中文（日文內容請務必保留標準日文漢字與平假名/片假名）輸出簡潔、一眼秒懂的即時學習小抄卡。")
+                appendLine("請嚴格按照以下四個區塊排版（不要加多餘寒暄）：")
+                appendLine()
+                appendLine("📖 【AI 原句標音與中譯】")
+                appendLine("• 讀音：$readingInstruction")
+                appendLine("• 中譯：（自然的台灣繁體中文翻譯）")
+                appendLine()
+                if (userUtterance.isNotBlank()) {
+                    appendLine("✍️ 【你的口說點評與道地改寫】")
+                    appendLine("• 點評使用者剛才說的：「$userUtterance」。若使用者夾雜了中文詞彙或助詞/文法不夠自然，請直接教他『💡 母語者道地說法（若為日文請附漢字平假名讀音）』並用一句話說明原因；若已經很自然，請給予肯定並提供一個進階/口語替換說法。")
+                    appendLine()
+                }
+                appendLine("🔑 【本輪關鍵單字／句型】")
+                appendLine("• 挑選本輪對話中最實用的 2 個單字、助詞用法或慣用句型（附讀音與中文解釋）。")
+                appendLine()
+                appendLine("🗣️ 【下一句你可以這樣回（可直接照著唸！）】")
+                appendLine("• 根據 AI 剛才的提問或情境，提供 2 個最自然、符合學生程度（$levelLabel）的下一句外語回答範例（若為日文，所有漢字務必加上括號平假名讀音，並在下一行附上 👉 繁體中文意思），讓使用者不知道怎麼接話時可以直接照著唸出來！")
+            }
+
+            val userContent = buildString {
+                if (userUtterance.isNotBlank()) {
+                    appendLine("【使用者剛才說的話】：$userUtterance")
+                } else {
+                    appendLine("【使用者剛才說的話】：（本輪為 AI 開場白，使用者尚未發言）")
+                }
+                appendLine("【AI 陪練員剛才說的話】：$aiUtterance")
+            }
+
+            val isOpenAiEndpoint = baseUrl.contains("api.openai.com")
+            val rawOutput = if (isOpenAiEndpoint) {
+                runCatching {
+                    val payload = JSONObject().apply {
+                        put("model", model)
+                        put("instructions", systemPrompt)
+                        put("input", userContent)
+                    }
+                    val resp = callResponses(baseUrl, apiKey, model, payload)
+                    extractTextFromResponsesObject(resp)
+                }.getOrElse {
+                    val msgs = JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("role", "system")
+                            put("content", systemPrompt)
+                        })
+                        put(JSONObject().apply {
+                            put("role", "user")
+                            put("content", userContent)
+                        })
+                    }
+                    val resp = callChatCompletions(baseUrl, apiKey, model, msgs, null)
+                    resp.optJSONArray("choices")
+                        ?.optJSONObject(0)
+                        ?.optJSONObject("message")
+                        ?.optString("content", "")
+                        .orEmpty()
+                }
+            } else {
+                val msgs = JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("role", "system")
+                        put("content", systemPrompt)
+                    })
+                    put(JSONObject().apply {
+                        put("role", "user")
+                        put("content", userContent)
+                    })
+                }
+                val resp = callChatCompletions(baseUrl, apiKey, model, msgs, null)
+                resp.optJSONArray("choices")
+                    ?.optJSONObject(0)
+                    ?.optJSONObject("message")
+                    ?.optString("content", "")
+                    .orEmpty()
+            }
+
+            TraditionalChineseConverter.toTraditional(rawOutput.trim(), preserveJapanese = true)
+        }
+    }
+
     private fun resolveBackendCredentials(settings: AppSettings): Triple<String, String, String> {
         val model = settings.backendBrainModel.trim().ifBlank { "gpt-6-luna" }
         val isGrokBackend = model.lowercase().startsWith("grok")

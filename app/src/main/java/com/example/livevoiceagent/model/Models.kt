@@ -11,6 +11,82 @@ enum class LiveProtocol(val label: String) {
     XAI_REALTIME("xAI Grok Voice (wss://api.x.ai/v1/realtime)")
 }
 
+enum class AppMode(val label: String) {
+    ASSISTANT("全雙工 AI 語音助理"),
+    TRANSLATE("即時同步口譯"),
+    TUTOR("AI 外語口說家教")
+}
+
+enum class TutorLevel(
+    val code: String,
+    val shortLabel: String,
+    val detailLabel: String,
+    val promptInstruction: String
+) {
+    BEGINNER(
+        code = "beginner",
+        shortLabel = "🌱 初學 (N5-N4)",
+        detailLabel = "慢速短句・允許中日/中英混講・主動提示",
+        promptInstruction = "使用者為初學者（約日檢 JLPT N5~N4 或 CEFR A1~A2 程度）。請放慢語速、使用基礎高頻單字與簡短句型（每次 1~2 句話）。若使用者卡詞或用中文夾雜外語回答，請完全理解並在自然接話時，順帶用簡短溫和的中文教他剛才那個詞的外語怎麼說。"
+    ),
+    INTERMEDIATE(
+        code = "intermediate",
+        shortLabel = "💬 日常 (N3-N2)",
+        detailLabel = "自然日常口語/丁寧語・訓練流暢聽說",
+        promptInstruction = "使用者為中級程度（約日檢 JLPT N3~N2 或 CEFR B1~B2 程度）。請使用自然的日常會話語速與常用句型（日語預設使用自然的丁寧語 です/ます 或依情境切換朋友口語），90% 以上使用目標外語交談，僅在使用者主動用中文求助時才用中文輔助解釋。"
+    ),
+    ADVANCED(
+        code = "advanced",
+        shortLabel = "💼 商務/母語 (N1)",
+        detailLabel = "道地母語語速・慣用語與職場敬語特訓",
+        promptInstruction = "使用者為高階學習者（約日檢 JLPT N1 或 CEFR C1 程度）。請使用 100% 道地母語者的自然語速、豐富慣用語，以及精準的社交／商務敬語（如日語的尊敬語、謙譲語與委婉表達），進行高擬真的母語實戰對談。"
+    )
+}
+
+enum class TutorScenario(
+    val code: String,
+    val shortLabel: String,
+    val roleDescription: String,
+    val openingTriggerPrompt: String
+) {
+    FREE_TALK(
+        code = "free_talk",
+        shortLabel = "☕ 自由閒聊",
+        roleDescription = "你是使用者親切的母語朋友兼口說陪練夥伴，輕鬆聊聊日常生活、興趣、美食、旅遊或最近發生的事。",
+        openingTriggerPrompt = "請用親切自然的目標語言主動向使用者打招呼，並問一個簡單好回答的日常問題（例如今天過得如何、最近有什麼有趣的事或喜歡吃什麼美食）來開啟對話。"
+    ),
+    IZAKAYA_ORDER(
+        code = "izakaya",
+        shortLabel = "🏮 餐廳/居酒屋點餐",
+        roleDescription = "你扮演熱情的當地餐廳／日本居酒屋店員，使用者是剛進店的客人。請引導客人完成：確認人數與座位、介紹招牌推薦菜色與飲品、確認點餐內容到結帳的實戰對話。",
+        openingTriggerPrompt = "請立刻進入「熱情的餐廳／日本居酒屋店員」角色，元氣滿滿地歡迎客人進店（例如日語：いらっしゃいませ！），並詢問今天有幾位客人、想坐吧檯還是桌席。"
+    ),
+    TRAVEL_HOTEL(
+        code = "travel",
+        shortLabel = "🧳 旅遊/飯店/問路",
+        roleDescription = "你扮演當地的飯店櫃檯人員、車站站務員或藥妝店員，協助身為旅客的使用者辦理飯店 Check-in、寄放行李、詢問搭車轉乘路線或退稅購物。",
+        openingTriggerPrompt = "請立刻進入「當地飯店櫃檯人員」角色，禮貌地向剛抵達櫃檯的旅客問好，詢問預訂大名並引導辦理入住（Check-in）或詢問是否需要寄放行李。"
+    ),
+    ANIME_CULTURE(
+        code = "anime",
+        shortLabel = "🎬 動漫/影視/朋友口語",
+        roleDescription = "你是熱愛動漫、遊戲、音樂與影視流行文化的當地年輕朋友，使用最自然的年輕朋友口語（如日語タメ口與流行語：めっちゃ、推し、ヤバい、神作）與使用者暢聊喜愛的作品。",
+        openingTriggerPrompt = "請用當地年輕朋友熱情的口語（如日語タメ口）主動打招呼，問使用者最近在追什麼動漫、日劇、遊戲，或是有沒有最喜歡的「推し（推的角色或作品）」！"
+    ),
+    BUSINESS_INTERVIEW(
+        code = "business",
+        shortLabel = "💼 外商/日商面試敬語",
+        roleDescription = "你扮演當地企業的面試官或商務客戶，與使用者練習求職面試自我介紹、專案溝通，以及得體的職場商務禮儀與敬語應對。",
+        openingTriggerPrompt = "請進入「企業面試官／商務主管」角色，用標準且禮貌的商務敬語向使用者問好，並請使用者先做一段簡短的自我介紹與應徵動機。"
+    ),
+    CUSTOM(
+        code = "custom",
+        shortLabel = "✨ 自訂情境",
+        roleDescription = "請依照使用者自訂的角色與情境設定，與使用者進行沉浸式口說角色扮演練習。",
+        openingTriggerPrompt = "請根據使用者設定的自訂情境，主動開口向使用者打招呼並開始角色扮演。"
+    )
+}
+
 enum class DelegationMode(val apiValue: String, val label: String) {
     RESPONSES("responses", "Responses 雲端原生委派 (OpenAI 自動路由後端模型)"),
     CLIENT("client", "Client 本機跨廠牌委派 (App 攔截並呼叫任意後端 API)")
@@ -193,6 +269,7 @@ data class AppSettings(
     val linkupApiKey: String = "",
     val customBackendBaseUrl: String = "https://api.openai.com/v1",
     val customBackendApiKey: String = "",
+    val appMode: AppMode = AppMode.ASSISTANT,
     val protocol: LiveProtocol = LiveProtocol.OPENAI_LIVE,
     val frontendVoiceModel: String = "gpt-live-1",
     val backendBrainModel: String = "gpt-6-luna",
@@ -207,6 +284,11 @@ data class AppSettings(
     val customGlossaryTerms: String = "",
     val translationContextPrompt: String = "",
     val usePromptAwareInterpreter: Boolean = false,
+    val tutorTargetLanguage: String = "ja",
+    val tutorLevel: TutorLevel = TutorLevel.BEGINNER,
+    val tutorScenario: TutorScenario = TutorScenario.FREE_TALK,
+    val tutorCustomScenarioPrompt: String = "",
+    val tutorAutoCoachEnabled: Boolean = true,
     val voiceSystemInstructions: String = DEFAULT_FRONTEND_VOICE_PROMPT,
     val backendSystemInstructions: String = DEFAULT_BACKEND_BRAIN_PROMPT,
     val fetchedVoiceModels: List<String> = DEFAULT_VOICE_MODELS,
@@ -263,8 +345,42 @@ data class AppSettings(
             "hi" to "🇮🇳 印地文 (Hindi)"
         )
 
+        val AVAILABLE_TUTOR_LANGUAGES = listOf(
+            "ja" to "🇯🇵 日語 (日本語)",
+            "en" to "🇺🇸 英語 (English)",
+            "ko" to "🇰🇷 韓語 (한국어)",
+            "es" to "🇪🇸 西語 (Español)",
+            "fr" to "🇫🇷 法語 (Français)",
+            "de" to "🇩🇪 德語 (Deutsch)"
+        )
+
         fun languageLabel(code: String): String {
             return AVAILABLE_TRANSLATION_LANGUAGES.firstOrNull { it.first == code }?.second ?: code
+        }
+
+        fun tutorLanguageLabel(code: String): String {
+            return AVAILABLE_TUTOR_LANGUAGES.firstOrNull { it.first == code }?.second
+                ?: languageLabel(code)
+        }
+
+        fun buildTutorVoiceInstructions(settings: AppSettings): String {
+            val langLabel = tutorLanguageLabel(settings.tutorTargetLanguage)
+            val scenarioDesc = if (settings.tutorScenario == TutorScenario.CUSTOM && settings.tutorCustomScenarioPrompt.isNotBlank()) {
+                "自訂練習情境：${settings.tutorCustomScenarioPrompt.trim()}"
+            } else {
+                "${settings.tutorScenario.shortLabel} — ${settings.tutorScenario.roleDescription}"
+            }
+
+            return buildString {
+                appendLine("你是專屬的沉浸式 AI 外語口說陪練家教（目標學習語言：【$langLabel】）。")
+                appendLine("1. 【學生程度與語速控制】：${settings.tutorLevel.promptInstruction}")
+                appendLine("2. 【當前情境與角色扮演】：$scenarioDesc")
+                appendLine("3. 【中英日混講（卡詞救星）支援】：使用者母語為台灣繁體中文。當使用者在說目標外語時，如果遇到不會講的單字而混用中文（例如在日文句子中夾雜中文詞彙，或直接用中文問某個詞怎麼說），請完全理解，並在你自然接話的開頭，用溫和簡短的一句話教他該詞彙的正確【$langLabel】說法，然後繼續推進情境對話！")
+                appendLine("4. 【嚴禁在語音中長篇大論說教】：請保持真實對話的節奏感！每次發言請控制在 1～3 句自然的【$langLabel】，並在結尾拋出一個簡單的互動提問讓使用者容易接話。詳細的漢字假名標音、中文翻譯與文法糾錯卡片已經由後端大腦自動顯示在手機畫面上了，你不需要在語音裡逐字唸出文法解析，除非使用者主動要求你用中文解釋。")
+                if (settings.tutorTargetLanguage == "ja") {
+                    appendLine("5. 【日文文字規範】：日語輸出請使用標準日文漢字與平假名／片假名。")
+                }
+            }
         }
 
         val AVAILABLE_VOICES = listOf(

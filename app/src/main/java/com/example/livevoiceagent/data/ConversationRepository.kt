@@ -20,7 +20,12 @@ class ConversationRepository(private val context: Context) {
 
     fun loadSettings(): AppSettings {
         val protocolName = prefs.getString("protocol", LiveProtocol.OPENAI_LIVE.name) ?: LiveProtocol.OPENAI_LIVE.name
+        val parsedProtocol = runCatching { LiveProtocol.valueOf(protocolName) }.getOrDefault(LiveProtocol.OPENAI_LIVE)
+        val defaultAppMode = if (parsedProtocol == LiveProtocol.OPENAI_TRANSLATE) AppMode.TRANSLATE else AppMode.ASSISTANT
+        val appModeName = prefs.getString("appMode", defaultAppMode.name) ?: defaultAppMode.name
         val delegationName = prefs.getString("delegationMode", DelegationMode.RESPONSES.name) ?: DelegationMode.RESPONSES.name
+        val tutorLevelName = prefs.getString("tutorLevel", TutorLevel.BEGINNER.name) ?: TutorLevel.BEGINNER.name
+        val tutorScenarioName = prefs.getString("tutorScenario", TutorScenario.FREE_TALK.name) ?: TutorScenario.FREE_TALK.name
 
         val savedVoiceModels = prefs.getString("fetchedVoiceModels", null)
             ?.split(",")
@@ -40,7 +45,8 @@ class ConversationRepository(private val context: Context) {
             linkupApiKey = prefs.getString("linkupApiKey", "") ?: "",
             customBackendBaseUrl = prefs.getString("customBackendBaseUrl", "https://api.openai.com/v1") ?: "https://api.openai.com/v1",
             customBackendApiKey = prefs.getString("customBackendApiKey", "") ?: "",
-            protocol = runCatching { LiveProtocol.valueOf(protocolName) }.getOrDefault(LiveProtocol.OPENAI_LIVE),
+            appMode = runCatching { AppMode.valueOf(appModeName) }.getOrDefault(defaultAppMode),
+            protocol = parsedProtocol,
             frontendVoiceModel = prefs.getString("frontendVoiceModel", "gpt-live-1") ?: "gpt-live-1",
             backendBrainModel = prefs.getString("backendBrainModel", "gpt-6-luna") ?: "gpt-6-luna",
             delegationMode = runCatching { DelegationMode.valueOf(delegationName) }.getOrDefault(DelegationMode.RESPONSES),
@@ -54,6 +60,11 @@ class ConversationRepository(private val context: Context) {
             customGlossaryTerms = prefs.getString("customGlossaryTerms", "") ?: "",
             translationContextPrompt = prefs.getString("translationContextPrompt", "") ?: "",
             usePromptAwareInterpreter = prefs.getBoolean("usePromptAwareInterpreter", false),
+            tutorTargetLanguage = prefs.getString("tutorTargetLanguage", "ja") ?: "ja",
+            tutorLevel = runCatching { TutorLevel.valueOf(tutorLevelName) }.getOrDefault(TutorLevel.BEGINNER),
+            tutorScenario = runCatching { TutorScenario.valueOf(tutorScenarioName) }.getOrDefault(TutorScenario.FREE_TALK),
+            tutorCustomScenarioPrompt = prefs.getString("tutorCustomScenarioPrompt", "") ?: "",
+            tutorAutoCoachEnabled = prefs.getBoolean("tutorAutoCoachEnabled", true),
             voiceSystemInstructions = prefs.getString(
                 "voiceSystemInstructions",
                 AppSettings.DEFAULT_FRONTEND_VOICE_PROMPT
@@ -74,6 +85,7 @@ class ConversationRepository(private val context: Context) {
             putString("linkupApiKey", settings.linkupApiKey.trim())
             putString("customBackendBaseUrl", settings.customBackendBaseUrl.trim())
             putString("customBackendApiKey", settings.customBackendApiKey.trim())
+            putString("appMode", settings.appMode.name)
             putString("protocol", settings.protocol.name)
             putString("frontendVoiceModel", settings.frontendVoiceModel.trim())
             putString("backendBrainModel", settings.backendBrainModel.trim())
@@ -88,6 +100,11 @@ class ConversationRepository(private val context: Context) {
             putString("customGlossaryTerms", settings.customGlossaryTerms)
             putString("translationContextPrompt", settings.translationContextPrompt)
             putBoolean("usePromptAwareInterpreter", settings.usePromptAwareInterpreter)
+            putString("tutorTargetLanguage", settings.tutorTargetLanguage.trim())
+            putString("tutorLevel", settings.tutorLevel.name)
+            putString("tutorScenario", settings.tutorScenario.name)
+            putString("tutorCustomScenarioPrompt", settings.tutorCustomScenarioPrompt)
+            putBoolean("tutorAutoCoachEnabled", settings.tutorAutoCoachEnabled)
             putString("voiceSystemInstructions", settings.voiceSystemInstructions)
             putString("backendSystemInstructions", settings.backendSystemInstructions)
             putString("fetchedVoiceModels", settings.fetchedVoiceModels.distinct().joinToString(","))
