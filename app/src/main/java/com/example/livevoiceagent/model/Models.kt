@@ -100,6 +100,35 @@ enum class MessageRole(val sortPriorityInTurn: Int) {
     SYSTEM(5)
 }
 
+data class TutorNotebookEntry(
+    val id: String = UUID.randomUUID().toString(),
+    val languageCode: String,
+    val aiSentence: String,
+    val userSentence: String = "",
+    val coachNotes: String,
+    val createdAt: Long = System.currentTimeMillis()
+) {
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("id", id)
+        put("languageCode", languageCode)
+        put("aiSentence", aiSentence)
+        put("userSentence", userSentence)
+        put("coachNotes", coachNotes)
+        put("createdAt", createdAt)
+    }
+
+    companion object {
+        fun fromJson(obj: JSONObject): TutorNotebookEntry = TutorNotebookEntry(
+            id = obj.optString("id", UUID.randomUUID().toString()),
+            languageCode = obj.optString("languageCode", "ja"),
+            aiSentence = obj.optString("aiSentence", ""),
+            userSentence = obj.optString("userSentence", ""),
+            coachNotes = obj.optString("coachNotes", ""),
+            createdAt = obj.optLong("createdAt", System.currentTimeMillis())
+        )
+    }
+}
+
 data class SearchSource(
     val title: String,
     val url: String,
@@ -134,6 +163,8 @@ data class ChatMessage(
     val sessionTimelineMs: Long = 0L,
     val modelTag: String = "",
     val sources: List<SearchSource> = emptyList(),
+    val audioClipPath: String? = null,
+    val imageLocalPath: String? = null,
     val isStreaming: Boolean = false
 ) {
     val hasThinkingDetails: Boolean
@@ -162,6 +193,8 @@ data class ChatMessage(
         val srcArr = JSONArray()
         sources.forEach { srcArr.put(it.toJson()) }
         put("sources", srcArr)
+        if (!audioClipPath.isNullOrBlank()) put("audioClipPath", audioClipPath)
+        if (!imageLocalPath.isNullOrBlank()) put("imageLocalPath", imageLocalPath)
     }
 
     companion object {
@@ -208,6 +241,8 @@ data class ChatMessage(
                 sessionTimelineMs = obj.optLong("sessionTimelineMs", 0L),
                 modelTag = obj.optString("modelTag", ""),
                 sources = srcList,
+                audioClipPath = obj.optString("audioClipPath", "").takeIf { it.isNotBlank() },
+                imageLocalPath = obj.optString("imageLocalPath", "").takeIf { it.isNotBlank() },
                 isStreaming = false
             )
         }
@@ -289,6 +324,9 @@ data class AppSettings(
     val tutorScenario: TutorScenario = TutorScenario.FREE_TALK,
     val tutorCustomScenarioPrompt: String = "",
     val tutorAutoCoachEnabled: Boolean = true,
+    val tutorInjectNotebookWeaknesses: Boolean = true,
+    val userMemoryProfile: String = "",
+    val longTermMemoryEnabled: Boolean = true,
     val voiceSystemInstructions: String = DEFAULT_FRONTEND_VOICE_PROMPT,
     val backendSystemInstructions: String = DEFAULT_BACKEND_BRAIN_PROMPT,
     val fetchedVoiceModels: List<String> = DEFAULT_VOICE_MODELS,
@@ -363,12 +401,28 @@ data class AppSettings(
                 ?: languageLabel(code)
         }
 
-        fun buildTutorVoiceInstructions(settings: AppSettings): String {
+        fun buildLongTermMemoryBlock(settings: AppSettings): String {
+            if (!settings.longTermMemoryEnabled || settings.userMemoryProfile.isBlank()) return ""
+            return "\n【使用者跨對話長期記憶檔案 (Long-Term Memory — 請自然記住並運用於對話與推理中，無須刻意背誦出來)】：\n${settings.userMemoryProfile.trim()}\n"
+        }
+
+        fun buildTutorVoiceInstructions(
+            settings: AppSettings,
+            notebookEntries: List<TutorNotebookEntry> = emptyList()
+        ): String {
             val langLabel = tutorLanguageLabel(settings.tutorTargetLanguage)
             val scenarioDesc = if (settings.tutorScenario == TutorScenario.CUSTOM && settings.tutorCustomScenarioPrompt.isNotBlank()) {
                 "自訂練習情境：${settings.tutorCustomScenarioPrompt.trim()}"
             } else {
                 "${settings.tutorScenario.shortLabel} — ${settings.tutorScenario.roleDescription}"
+            }
+
+            val relevantNotebook = if (settings.tutorInjectNotebookWeaknesses) {
+                notebookEntries
+                    .filter { it.languageCode == settings.tutorTargetLanguage }
+                    .take(6)
+            } else {
+                emptyList()
             }
 
             return buildString {
@@ -379,6 +433,18 @@ data class AppSettings(
                 appendLine("4. 【嚴禁在語音中長篇大論說教】：請保持真實對話的節奏感！每次發言請控制在 1～3 句自然的【$langLabel】，並在結尾拋出一個簡單的互動提問讓使用者容易接話。詳細的漢字假名標音、中文翻譯與文法糾錯卡片已經由後端大腦自動顯示在手機畫面上了，你不需要在語音裡逐字唸出文法解析，除非使用者主動要求你用中文解釋。")
                 if (settings.tutorTargetLanguage == "ja") {
                     appendLine("5. 【日文文字規範】：日語輸出請使用標準日文漢字與平假名／片假名。")
+                }
+                if (relevantNotebook.isNotEmpty()) {
+                    appendLine("6. 【學生個人複習本＆常錯弱點（請在聊天中自然引導學生複習或造出以下他收藏過的表達）】：")
+                    relevantNotebook.forEachIndexed { idx, entry ->
+                        val snippet = entry.aiSentence.take(90)
+                        val userPart = if (entry.userSentence.isNotBlank()) "（學生曾說：${entry.userSentence.take(60)}）" else ""
+                        appendLine("   - (${idx + 1}) $snippet $userPart")
+                    }
+                }
+                val memBlock = buildLongTermMemoryBlock(settings)
+                if (memBlock.isNotBlank()) {
+                    appendLine(memBlock)
                 }
             }
         }

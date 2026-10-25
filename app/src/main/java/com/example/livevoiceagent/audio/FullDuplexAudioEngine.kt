@@ -587,14 +587,20 @@ class FullDuplexAudioEngine(
         playThread.start()
     }
 
-    fun enqueueOutputAudioBase64(base64Pcm: String) {
-        if (!isRunning || base64Pcm.isEmpty()) return
-        runCatching {
+    fun enqueueOutputAudioBase64(base64Pcm: String): ByteArray? {
+        if (base64Pcm.isEmpty()) return null
+        return runCatching {
             val bytes = Base64.decode(base64Pcm, Base64.DEFAULT)
-            if (bytes.isNotEmpty()) {
+            if (bytes.isNotEmpty() && isRunning) {
                 playbackQueue.offer(bytes)
             }
-        }
+            bytes.takeIf { it.isNotEmpty() }
+        }.getOrNull()
+    }
+
+    fun extendSpeakerProtectionWindow(durationMs: Long) {
+        val until = System.currentTimeMillis() + durationMs
+        speakerActiveUntilWallMs = maxOf(speakerActiveUntilWallMs, until)
     }
 
     fun clearPlaybackBuffer() {
@@ -666,5 +672,107 @@ class FullDuplexAudioEngine(
             sumSquares += normalized * normalized
         }
         return sqrt(sumSquares / sampleCount).toFloat()
+    }
+
+    companion object {
+        @Volatile
+        private var activeReplayTrack: AudioTrack? = null
+
+        @Volatile
+        private var activeReplayThread: Thread? = null
+
+        fun stopClipReplay() {
+            runCatching { activeReplayThread?.interrupt() }
+            activeReplayThread = null
+            runCatching {
+                activeReplayTrack?.pause()
+                activeReplayTrack?.flush()
+                activeReplayTrack?.release()
+            }
+            activeReplayTrack = null
+        }
+
+        /**
+         * Plays a saved 24kHz 16-bit mono PCM clip from disk at the requested speed (e.g., 1.0f or 0.75f)
+         * with pitch preservation (time-stretching) for language shadowing practice!
+         */
+        fun playSavedPcmClip(
+            filePath: String,
+            speed: Float = 1.0f,
+            sampleRate: Int = 24000
+        ): Long {
+            stopClipReplay()
+            val file = java.io.File(filePath)
+            if (!file.exists() || file.length() < 400L) return 0L
+            val pcmBytes = runCatching { file.readBytes() }.getOrNull() ?: return 0L
+            val safeSpeed = speed.coerceIn(0.5f, 1.5f)
+            val durationMs = ((pcmBytes.size / 2L) * 1000L / sampleRate / safeSpeed).toLong()
+
+            val t = Thread({
+                Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
+                var track: AudioTrack? = null
+                try {
+                    val minBuf = AudioTrack.getMinBufferSize(
+                        sampleRate,
+                        AudioFormat.CHANNEL_OUT_MONO,
+                        AudioFormat.ENCODING_PCM_16BIT
+                    ).coerceAtLeast(4800)
+
+                    track = AudioTrack.Builder()
+                        .setAudioAttributes(
+                            AudioAttributes.Builder()
+                                .setUsage(AudioAttributes.USAGE_MEDIA)
+                                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                                .build()
+                        )
+                        .setAudioFormat(
+                            AudioFormat.Builder()
+                                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                                .setSampleRate(sampleRate)
+                                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                                .build()
+                        )
+                        .setBufferSizeInBytes(maxOf(minBuf * 2, 19200))
+                        .setTransferMode(AudioTrack.MODE_STREAM)
+                        .build()
+
+                    activeReplayTrack = track
+                    if ( safeSpeed != 1.0f) {
+                        runCatching {
+                            track.playbackParams = PlaybackParams()
+                                .setSpeed(safeSpeed)
+                                .setPitch(1.0f)
+                                .setAudioFallbackMode(PlaybackParams.AUDIO_FALLBACK_MODE_DEFAULT)
+                        }
+                    }
+                    track.play()
+
+                    var offset = 0
+                    val chunkSize = 4800
+                    while (offset < pcmBytes.size && !Thread.currentThread().isInterrupted) {
+                        val toWrite = minOf(chunkSize, pcmBytes.size - offset)
+                        val written = track.write(pcmBytes, offset, toWrite, AudioTrack.WRITE_BLOCKING)
+                        if (written <= 0) break
+                        offset += written
+                    }
+                    if (!Thread.currentThread().isInterrupted) {
+                        Thread.sleep(220)
+                    }
+                } catch (_: InterruptedException) {
+                } catch (_: Exception) {
+                } finally {
+                    runCatching {
+                        track?.stop()
+                        track?.release()
+                    }
+                    if (activeReplayTrack === track) {
+                        activeReplayTrack = null
+                    }
+                }
+            }, "TutorClipReplayThread")
+            activeReplayThread = t
+            t.start()
+            return durationMs
+        }
     }
 }

@@ -32,6 +32,7 @@ interface LiveSessionListener {
         turnIndex: Int
     )
     fun onSearchCardAdded(result: LinkupSearchResult, turnIndex: Int)
+    fun onVoiceClipSaved(turnIndex: Int, clipFilePath: String)
     fun onTurnCompleted()
     fun onMicLevelChanged(level: Float)
     fun onVoiceUsageUpdated(seconds: Int)
@@ -97,8 +98,70 @@ class LiveSessionManager(
 
     private var tutorCoachDebounceJob: Job? = null
     private val coachedVoiceTextByTurn = java.util.concurrent.ConcurrentHashMap<Int, String>()
+    private var activeNotebookEntries: List<TutorNotebookEntry> = emptyList()
+
+    private val audioClipLock = Any()
+    private val currentTurnAudioBuffer = java.io.ByteArrayOutputStream(96000)
+    @Volatile
+    private var currentAudioTurnIndex: Int = -1
+    private var audioClipSaveDebounceJob: Job? = null
+
+    private fun appendOutputAudioAndScheduleClipSave(base64Delta: String) {
+        val pcmBytes = audioEngine?.enqueueOutputAudioBase64(base64Delta) ?: return
+        val turnIdx = currentTurnIndex
+        synchronized(audioClipLock) {
+            if (currentAudioTurnIndex != -1 && currentAudioTurnIndex != turnIdx) {
+                flushAudioClipLocked(currentAudioTurnIndex)
+            }
+            currentAudioTurnIndex = turnIdx
+            // Cap per-turn clip at ~45 seconds (2.16 MB) to keep cache lightweight
+            if (currentTurnAudioBuffer.size() < 2_160_000) {
+                currentTurnAudioBuffer.write(pcmBytes)
+            }
+        }
+        audioClipSaveDebounceJob?.cancel()
+        audioClipSaveDebounceJob = scope.launch {
+            delay(850)
+            synchronized(audioClipLock) {
+                if (currentAudioTurnIndex == turnIdx) {
+                    flushAudioClipLocked(turnIdx)
+                }
+            }
+        }
+    }
+
+    private fun flushAudioClipLocked(turnIdx: Int) {
+        if (turnIdx <= 0 || currentTurnAudioBuffer.size() < 2400) return
+        val bytes = currentTurnAudioBuffer.toByteArray()
+        runCatching {
+            val dir = java.io.File(context.cacheDir, "voice_clips").apply { mkdirs() }
+            val clipFile = java.io.File(dir, "clip_${sessionEpochId}_turn_${turnIdx}.pcm")
+            clipFile.writeBytes(bytes)
+            listener.onVoiceClipSaved(turnIdx, clipFile.absolutePath)
+
+            // Prune oldest clips if > 45 files
+            val allFiles = dir.listFiles()?.sortedByDescending { it.lastModified() }.orEmpty()
+            if (allFiles.size > 45) {
+                allFiles.drop(45).forEach { runCatching { it.delete() } }
+            }
+        }
+    }
+
+    fun playSavedVoiceClip(filePath: String, speed: Float = 1.0f) {
+        val durationMs = FullDuplexAudioEngine.playSavedPcmClip(filePath = filePath, speed = speed)
+        if (durationMs > 0L) {
+            audioEngine?.extendSpeakerProtectionWindow(durationMs + 450L)
+        }
+    }
 
     private fun advanceToNextTurn() {
+        synchronized(audioClipLock) {
+            if (currentAudioTurnIndex > 0) {
+                flushAudioClipLocked(currentAudioTurnIndex)
+                currentTurnAudioBuffer.reset()
+                currentAudioTurnIndex = -1
+            }
+        }
         currentTurnIndex++
         userCharsInTurn = 0
         voiceCharsInTurn = 0
@@ -151,11 +214,13 @@ class LiveSessionManager(
     fun connect(
         settings: AppSettings,
         priorMessages: List<ChatMessage>,
+        notebookEntries: List<TutorNotebookEntry> = emptyList(),
         conversationSnapshotProvider: () -> List<ChatMessage>,
         useSpeakerphone: Boolean = true
     ) {
         disconnectImmediate()
         activeSettings = settings
+        activeNotebookEntries = notebookEntries
         sessionStarted = false
         isClosing = false
 
@@ -402,7 +467,7 @@ class LiveSessionManager(
 
         if (isTutorMode) {
             isClientDelegationSession = true
-            val tutorInstructions = "$timeContext\n\n${AppSettings.buildTutorVoiceInstructions(settings)}$glossaryBlock"
+            val tutorInstructions = "$timeContext\n\n${AppSettings.buildTutorVoiceInstructions(settings, activeNotebookEntries)}$glossaryBlock"
             val seedArray = buildSeedInputArray(priorMessages)
 
             val sessionObj = JSONObject().apply {
@@ -449,9 +514,10 @@ class LiveSessionManager(
 
         isClientDelegationSession = useClientDelegation
 
+        val memoryBlock = AppSettings.buildLongTermMemoryBlock(settings)
         val sessionObj = JSONObject().apply {
             put("model", frontModel)
-            put("instructions", "$timeContext\n\n${settings.voiceSystemInstructions}$glossaryBlock\n（補充：當後端正在查詢資料或搜尋時，你可以繼續自然地與使用者閒聊互動，直到收到後端結果為止。）")
+            put("instructions", "$timeContext\n\n${settings.voiceSystemInstructions}$glossaryBlock$memoryBlock\n（補充：當後端正在查詢資料或搜尋時，你可以繼續自然地與使用者閒聊互動，直到收到後端結果為止。）")
 
             val seedArray = buildSeedInputArray(priorMessages)
             if (seedArray.length() > 0) {
@@ -482,7 +548,7 @@ class LiveSessionManager(
                     put("type", "responses")
                     put("responses", JSONObject().apply {
                         put("model", backModel)
-                        put("instructions", "$timeContext\n\n${settings.backendSystemInstructions}$glossaryBlock")
+                        put("instructions", "$timeContext\n\n${settings.backendSystemInstructions}$glossaryBlock$memoryBlock")
                         if (toolsArr.length() > 0) {
                             put("tools", toolsArr)
                             put("tool_choice", "auto")
@@ -580,7 +646,7 @@ class LiveSessionManager(
             "session.output_audio.delta" -> {
                 val delta = event.optString("delta", "")
                 if (delta.isNotEmpty()) {
-                    audioEngine?.enqueueOutputAudioBase64(delta)
+                    appendOutputAudioAndScheduleClipSave(delta)
                 }
             }
 
@@ -997,10 +1063,11 @@ class LiveSessionManager(
             CalendarToolManager.buildResponsesCalendarToolSchemas().forEach { toolsArr.put(it) }
         }
 
+        val memoryBlock = AppSettings.buildLongTermMemoryBlock(settings)
         val instructionsText = if (settings.appMode == AppMode.TUTOR) {
-            "$timeContext\n\n${AppSettings.buildTutorVoiceInstructions(settings)}"
+            "$timeContext\n\n${AppSettings.buildTutorVoiceInstructions(settings, activeNotebookEntries)}"
         } else {
-            "$timeContext\n\n${settings.voiceSystemInstructions}"
+            "$timeContext\n\n${settings.voiceSystemInstructions}$memoryBlock"
         }
 
         val sessionUpdate = JSONObject().apply {
@@ -1085,12 +1152,16 @@ class LiveSessionManager(
         }
     }
 
-    fun updateTutorLiveSettings(newSettings: AppSettings) {
+    fun updateTutorLiveSettings(
+        newSettings: AppSettings,
+        notebookEntries: List<TutorNotebookEntry> = activeNotebookEntries
+    ) {
         activeSettings = newSettings
+        activeNotebookEntries = notebookEntries
         val ws = webSocket
         if (ws != null && sessionStarted && !isClosing && newSettings.appMode == AppMode.TUTOR) {
             val langShort = AppSettings.tutorLanguageLabel(newSettings.tutorTargetLanguage).substringBefore(" (")
-            val updatedRules = AppSettings.buildTutorVoiceInstructions(newSettings)
+            val updatedRules = AppSettings.buildTutorVoiceInstructions(newSettings, activeNotebookEntries)
             if (activeProtocol == LiveProtocol.OPENAI_LIVE) {
                 runCatching {
                     ws.send(JSONObject().apply {
@@ -1175,7 +1246,7 @@ class LiveSessionManager(
             "session.output_audio.delta" -> {
                 val delta = event.optString("delta", "")
                 if (delta.isNotEmpty()) {
-                    audioEngine?.enqueueOutputAudioBase64(delta)
+                    appendOutputAudioAndScheduleClipSave(delta)
                 }
             }
 
@@ -1288,7 +1359,7 @@ class LiveSessionManager(
             "response.audio.delta", "response.output_audio.delta" -> {
                 val delta = event.optString("delta", "")
                 if (delta.isNotEmpty()) {
-                    audioEngine?.enqueueOutputAudioBase64(delta)
+                    appendOutputAudioAndScheduleClipSave(delta)
                 }
             }
 
@@ -1650,10 +1721,59 @@ class LiveSessionManager(
         }
     }
 
+    fun allocateNextTurnIndexForVision(): Int {
+        if (userCharsInTurn > 0 || voiceCharsInTurn > 0) {
+            advanceToNextTurn()
+        }
+        return currentTurnIndex
+    }
+
+    fun injectVisionResultIntoActiveVoiceSession(spokenDirectiveOrSummary: String) {
+        val ws = webSocket ?: return
+        if (!sessionStarted || isClosing || spokenDirectiveOrSummary.isBlank()) return
+        when (activeProtocol) {
+            LiveProtocol.OPENAI_LIVE -> {
+                runCatching {
+                    ws.send(JSONObject().apply {
+                        put("type", "session.commentary.append")
+                        put("event_id", "vision_${UUID.randomUUID().toString().take(8)}")
+                        put("delegation_id", JSONObject.NULL)
+                        put("content", spokenDirectiveOrSummary.take(1400))
+                    }.toString())
+                }
+            }
+            LiveProtocol.OPENAI_REALTIME, LiveProtocol.XAI_REALTIME -> {
+                runCatching {
+                    ws.send(JSONObject().apply {
+                        put("type", "conversation.item.create")
+                        put("item", JSONObject().apply {
+                            put("type", "message")
+                            put("role", "user")
+                            put("content", JSONArray().put(JSONObject().apply {
+                                put("type", "input_text")
+                                put("text", spokenDirectiveOrSummary.take(1400))
+                            }))
+                        })
+                    }.toString())
+                    ws.send(JSONObject().apply { put("type", "response.create") }.toString())
+                }
+            }
+            else -> {}
+        }
+    }
+
     fun disconnectImmediate() {
         isClosing = false
         sessionStarted = false
         tutorCoachDebounceJob?.cancel()
+        audioClipSaveDebounceJob?.cancel()
+        synchronized(audioClipLock) {
+            if (currentAudioTurnIndex > 0) {
+                flushAudioClipLocked(currentAudioTurnIndex)
+                currentTurnAudioBuffer.reset()
+                currentAudioTurnIndex = -1
+            }
+        }
         audioEngine?.stop()
         audioEngine = null
         runCatching { webSocket?.close(1000, "User ended session") }

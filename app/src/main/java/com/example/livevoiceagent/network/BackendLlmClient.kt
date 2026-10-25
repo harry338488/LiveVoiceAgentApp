@@ -1,8 +1,6 @@
 package com.example.livevoiceagent.network
 
-import com.example.livevoiceagent.model.AppSettings
-import com.example.livevoiceagent.model.ChatMessage
-import com.example.livevoiceagent.model.MessageRole
+import com.example.livevoiceagent.model.*
 import com.example.livevoiceagent.tools.CalendarToolManager
 import com.example.livevoiceagent.util.TraditionalChineseConverter
 import kotlinx.coroutines.Dispatchers
@@ -39,6 +37,7 @@ class BackendLlmClient(
         settings: AppSettings,
         conversationHistory: List<ChatMessage>,
         taskHint: String? = null,
+        imageBase64: String? = null,
         onThinkingStatusUpdate: (String) -> Unit = {},
         onSearchExecuted: (LinkupSearchResult) -> Unit = {},
         onCalendarActionLogged: (String) -> Unit = {}
@@ -46,7 +45,8 @@ class BackendLlmClient(
         runCatching {
             val (baseUrl, apiKey, model) = resolveBackendCredentials(settings)
             val timeContext = CalendarToolManager.buildCurrentTimeContextString()
-            val systemInstructions = "$timeContext\n\n${settings.backendSystemInstructions}"
+            val memoryBlock = AppSettings.buildLongTermMemoryBlock(settings)
+            val systemInstructions = "$timeContext\n\n${settings.backendSystemInstructions}$memoryBlock"
 
             val collectedSearches = mutableListOf<LinkupSearchResult>()
             val canUseLinkup = settings.linkupSearchEnabled && settings.linkupApiKey.isNotBlank()
@@ -65,6 +65,7 @@ class BackendLlmClient(
                         systemInstructions = systemInstructions,
                         conversationHistory = conversationHistory,
                         taskHint = taskHint,
+                        imageBase64 = imageBase64,
                         settings = settings,
                         canUseLinkup = canUseLinkup,
                         canUseCalendar = canUseCalendar,
@@ -81,6 +82,7 @@ class BackendLlmClient(
                         systemInstructions = systemInstructions,
                         conversationHistory = conversationHistory,
                         taskHint = taskHint,
+                        imageBase64 = imageBase64,
                         settings = settings,
                         canUseLinkup = canUseLinkup,
                         canUseCalendar = canUseCalendar,
@@ -98,6 +100,7 @@ class BackendLlmClient(
                     systemInstructions = systemInstructions,
                     conversationHistory = conversationHistory,
                     taskHint = taskHint,
+                    imageBase64 = imageBase64,
                     settings = settings,
                     canUseLinkup = canUseLinkup,
                     canUseCalendar = canUseCalendar,
@@ -108,7 +111,7 @@ class BackendLlmClient(
                 )
             }
 
-            val tradContent = TraditionalChineseConverter.toTraditional(finalContent.trim())
+            val tradContent = TraditionalChineseConverter.toTraditional(finalContent.trim(), preserveJapanese = true)
             val spokenSummary = if (tradContent.length > 800) {
                 tradContent.take(800) + "...（完整細節已留存在對話紀錄的思考重點中）"
             } else {
@@ -130,6 +133,7 @@ class BackendLlmClient(
         systemInstructions: String,
         conversationHistory: List<ChatMessage>,
         taskHint: String?,
+        imageBase64: String?,
         settings: AppSettings,
         canUseLinkup: Boolean,
         canUseCalendar: Boolean,
@@ -163,14 +167,30 @@ class BackendLlmClient(
                 }
             }
 
-        if (!taskHint.isNullOrBlank()) {
+        if (!taskHint.isNullOrBlank() || !imageBase64.isNullOrBlank()) {
+            val contentParts = JSONArray()
+            if (!taskHint.isNullOrBlank()) {
+                contentParts.put(JSONObject().apply {
+                    put("type", "input_text")
+                    put("text", taskHint)
+                })
+            } else {
+                contentParts.put(JSONObject().apply {
+                    put("type", "input_text")
+                    put("text", "請解析這張圖片的內容。")
+                })
+            }
+            if (!imageBase64.isNullOrBlank()) {
+                val dataUrl = if (imageBase64.startsWith("data:")) imageBase64 else "data:image/jpeg;base64,$imageBase64"
+                contentParts.put(JSONObject().apply {
+                    put("type", "input_image")
+                    put("image_url", dataUrl)
+                })
+            }
             inputArr.put(JSONObject().apply {
                 put("type", "message")
                 put("role", "user")
-                put("content", JSONArray().put(JSONObject().apply {
-                    put("type", "input_text")
-                    put("text", taskHint)
-                }))
+                put("content", contentParts)
             })
         }
 
@@ -300,6 +320,7 @@ class BackendLlmClient(
         systemInstructions: String,
         conversationHistory: List<ChatMessage>,
         taskHint: String?,
+        imageBase64: String?,
         settings: AppSettings,
         canUseLinkup: Boolean,
         canUseCalendar: Boolean,
@@ -334,11 +355,31 @@ class BackendLlmClient(
                 }
             }
 
-        if (!taskHint.isNullOrBlank()) {
-            messagesArr.put(JSONObject().apply {
-                put("role", "user")
-                put("content", taskHint)
-            })
+        if (!taskHint.isNullOrBlank() || !imageBase64.isNullOrBlank()) {
+            if (!imageBase64.isNullOrBlank()) {
+                val dataUrl = if (imageBase64.startsWith("data:")) imageBase64 else "data:image/jpeg;base64,$imageBase64"
+                val contentArr = JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("type", "text")
+                        put("text", taskHint?.takeIf { it.isNotBlank() } ?: "請解析這張圖片的內容。")
+                    })
+                    put(JSONObject().apply {
+                        put("type", "image_url")
+                        put("image_url", JSONObject().apply {
+                            put("url", dataUrl)
+                        })
+                    })
+                }
+                messagesArr.put(JSONObject().apply {
+                    put("role", "user")
+                    put("content", contentArr)
+                })
+            } else {
+                messagesArr.put(JSONObject().apply {
+                    put("role", "user")
+                    put("content", taskHint)
+                })
+            }
         }
 
         val toolsArray = JSONArray()
@@ -612,6 +653,66 @@ class BackendLlmClient(
             }
 
             TraditionalChineseConverter.toTraditional(rawOutput.trim(), preserveJapanese = true)
+        }
+    }
+
+    /**
+     * Extracts and merges persistent user memory facts (background, language learning level/goals,
+     * personal preferences, recurring topics) from recent conversation history into `userMemoryProfile`.
+     */
+    suspend fun extractAndMergeUserMemory(
+        settings: AppSettings,
+        messages: List<ChatMessage>
+    ): Result<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            val (baseUrl, apiKey, model) = resolveBackendCredentials(settings)
+            val recentSnippet = messages
+                .filter { it.role == MessageRole.USER || it.role == MessageRole.ASSISTANT_VOICE }
+                .takeLast(20)
+                .joinToString("\n") { msg ->
+                    val speaker = if (msg.role == MessageRole.USER) "使用者" else "AI"
+                    "$speaker: ${msg.text.take(300)}"
+                }
+            if (recentSnippet.isBlank()) {
+                return@withContext Result.failure(IllegalStateException("目前對話尚無內容可供提煉記憶"))
+            }
+
+            val sysPrompt = """你是負責維護「使用者跨對話長期記憶檔案 (Long-Term Memory)」的記憶整理專家。
+請根據「既有長期記憶」與「最新對話紀錄」，合併並整理出關於這位使用者的長期特徵與背景（例如：稱呼/背景、學習的外語與程度弱點、興趣喜好、工作/生活習慣、常查詢的主題或重要待辦事項）。
+規則：
+1. 請使用繁體中文條列式（`• `）輸出，總長度控制在 10 條以內、精煉不重複。
+2. 保留既有記憶中仍然有效的部分，並融合本次對話新發現的事實。
+3. 只輸出整理後的條列清單本身，不要加任何開場白或結尾說明。"""
+
+            val userInput = buildString {
+                appendLine("【既有長期記憶】：")
+                appendLine(settings.userMemoryProfile.ifBlank { "（尚無紀錄）" })
+                appendLine()
+                appendLine("【最新對話紀錄】：")
+                appendLine(recentSnippet)
+            }
+
+            val msgs = JSONArray().apply {
+                put(JSONObject().apply {
+                    put("role", "system")
+                    put("content", sysPrompt)
+                })
+                put(JSONObject().apply {
+                    put("role", "user")
+                    put("content", userInput)
+                })
+            }
+
+            val resp = callChatCompletions(baseUrl, apiKey, model, msgs, null)
+            val merged = resp.optJSONArray("choices")
+                ?.optJSONObject(0)
+                ?.optJSONObject("message")
+                ?.optString("content", "")
+                ?.trim()
+                .orEmpty()
+
+            if (merged.isBlank()) throw IllegalStateException("未回傳有效記憶內容")
+            TraditionalChineseConverter.toTraditional(merged, preserveJapanese = true)
         }
     }
 

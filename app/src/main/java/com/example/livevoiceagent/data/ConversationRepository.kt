@@ -16,7 +16,9 @@ class ConversationRepository(private val context: Context) {
 
     private val prefs = context.getSharedPreferences("live_voice_agent_prefs", Context.MODE_PRIVATE)
     private val sessionsFile = File(context.filesDir, "conversation_sessions.json")
+    private val notebookFile = File(context.filesDir, "tutor_notebook.json")
     private val fileMutex = Mutex()
+    private val notebookMutex = Mutex()
 
     fun loadSettings(): AppSettings {
         val protocolName = prefs.getString("protocol", LiveProtocol.OPENAI_LIVE.name) ?: LiveProtocol.OPENAI_LIVE.name
@@ -65,6 +67,9 @@ class ConversationRepository(private val context: Context) {
             tutorScenario = runCatching { TutorScenario.valueOf(tutorScenarioName) }.getOrDefault(TutorScenario.FREE_TALK),
             tutorCustomScenarioPrompt = prefs.getString("tutorCustomScenarioPrompt", "") ?: "",
             tutorAutoCoachEnabled = prefs.getBoolean("tutorAutoCoachEnabled", true),
+            tutorInjectNotebookWeaknesses = prefs.getBoolean("tutorInjectNotebookWeaknesses", true),
+            userMemoryProfile = prefs.getString("userMemoryProfile", "") ?: "",
+            longTermMemoryEnabled = prefs.getBoolean("longTermMemoryEnabled", true),
             voiceSystemInstructions = prefs.getString(
                 "voiceSystemInstructions",
                 AppSettings.DEFAULT_FRONTEND_VOICE_PROMPT
@@ -105,6 +110,9 @@ class ConversationRepository(private val context: Context) {
             putString("tutorScenario", settings.tutorScenario.name)
             putString("tutorCustomScenarioPrompt", settings.tutorCustomScenarioPrompt)
             putBoolean("tutorAutoCoachEnabled", settings.tutorAutoCoachEnabled)
+            putBoolean("tutorInjectNotebookWeaknesses", settings.tutorInjectNotebookWeaknesses)
+            putString("userMemoryProfile", settings.userMemoryProfile)
+            putBoolean("longTermMemoryEnabled", settings.longTermMemoryEnabled)
             putString("voiceSystemInstructions", settings.voiceSystemInstructions)
             putString("backendSystemInstructions", settings.backendSystemInstructions)
             putString("fetchedVoiceModels", settings.fetchedVoiceModels.distinct().joinToString(","))
@@ -150,6 +158,68 @@ class ConversationRepository(private val context: Context) {
             sessions.forEach { arr.put(it.toJson()) }
             sessionsFile.writeText(arr.toString(2))
         }
+    }
+
+    suspend fun loadNotebookEntries(): List<TutorNotebookEntry> = withContext(Dispatchers.IO) {
+        notebookMutex.withLock {
+            if (!notebookFile.exists()) return@withLock emptyList()
+            runCatching {
+                val content = notebookFile.readText()
+                val arr = JSONArray(content)
+                val list = mutableListOf<TutorNotebookEntry>()
+                for (i in 0 until arr.length()) {
+                    arr.optJSONObject(i)?.let { list.add(TutorNotebookEntry.fromJson(it)) }
+                }
+                list.sortedByDescending { it.createdAt }
+            }.getOrDefault(emptyList())
+        }
+    }
+
+    suspend fun saveNotebookEntry(entry: TutorNotebookEntry): List<TutorNotebookEntry> = withContext(Dispatchers.IO) {
+        val current = loadNotebookEntries().toMutableList()
+        val existingIdx = current.indexOfFirst {
+            it.id == entry.id || (it.aiSentence == entry.aiSentence && it.languageCode == entry.languageCode)
+        }
+        if (existingIdx >= 0) {
+            current[existingIdx] = entry
+        } else {
+            current.add(0, entry)
+        }
+        val sorted = current.sortedByDescending { it.createdAt }
+        notebookMutex.withLock {
+            val arr = JSONArray()
+            sorted.forEach { arr.put(it.toJson()) }
+            notebookFile.writeText(arr.toString(2))
+        }
+        sorted
+    }
+
+    suspend fun deleteNotebookEntry(entryId: String): List<TutorNotebookEntry> = withContext(Dispatchers.IO) {
+        val updated = loadNotebookEntries().filterNot { it.id == entryId }
+        notebookMutex.withLock {
+            val arr = JSONArray()
+            updated.forEach { arr.put(it.toJson()) }
+            notebookFile.writeText(arr.toString(2))
+        }
+        updated
+    }
+
+    fun exportNotebookToAnkiTsv(entries: List<TutorNotebookEntry>): String {
+        val sb = StringBuilder()
+        sb.appendLine("#separator:tab")
+        sb.appendLine("#html:true")
+        entries.forEach { entry ->
+            val front = entry.aiSentence.replace("\t", " ").replace("\n", "<br>")
+            val back = buildString {
+                if (entry.userSentence.isNotBlank()) {
+                    append("【我的原句】${entry.userSentence}<br><br>")
+                }
+                append(entry.coachNotes.replace("\t", " ").replace("\n", "<br>"))
+            }
+            val tag = "LiveVoiceTutor_${entry.languageCode}"
+            sb.appendLine("$front\t$back\t$tag")
+        }
+        return sb.toString()
     }
 
     fun exportSessionToMarkdown(session: ConversationSession): String {

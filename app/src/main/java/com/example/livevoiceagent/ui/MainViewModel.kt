@@ -32,8 +32,11 @@ data class UiState(
         backendModel = "gpt-6-luna"
     ),
     val savedSessions: List<ConversationSession> = emptyList(),
+    val tutorNotebook: List<TutorNotebookEntry> = emptyList(),
     val historySearchQuery: String = "",
     val isFetchingModels: Boolean = false,
+    val isExtractingMemory: Boolean = false,
+    val isAnalyzingImage: Boolean = false,
     val modelFetchStatus: String = "",
     val errorToast: String? = null
 )
@@ -71,7 +74,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
         }
         viewModelScope.launch {
             val sessions = repository.loadAllSessions()
-            _uiState.update { it.copy(savedSessions = sessions) }
+            val notebook = repository.loadNotebookEntries()
+            _uiState.update { it.copy(savedSessions = sessions, tutorNotebook = notebook) }
         }
     }
 
@@ -127,6 +131,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
         liveSessionManager.connect(
             settings = state.settings,
             priorMessages = state.currentSession.messages,
+            notebookEntries = state.tutorNotebook,
             conversationSnapshotProvider = { _uiState.value.currentSession.messages },
             useSpeakerphone = state.isSpeakerphoneOn
         )
@@ -135,6 +140,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
     fun stopLiveCall() {
         liveSessionManager.disconnectGracefully()
         triggerAiTitleGenerationIfNeeded()
+        triggerBackgroundMemoryExtractionIfNeeded()
         persistCurrentSession()
     }
 
@@ -203,7 +209,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
 
     fun updateTutorConfig(newSettings: AppSettings, restartScenarioGreeting: Boolean = false) {
         updateSettings(newSettings)
-        liveSessionManager.updateTutorLiveSettings(newSettings)
+        liveSessionManager.updateTutorLiveSettings(newSettings, _uiState.value.tutorNotebook)
         if (restartScenarioGreeting && _uiState.value.connectionState != ConnectionState.DISCONNECTED) {
             liveSessionManager.sendTutorQuickAction("start_scenario")
         } else if (_uiState.value.connectionState == ConnectionState.DISCONNECTED && newSettings.appMode == AppMode.TUTOR) {
@@ -217,6 +223,287 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
 
     fun triggerTutorQuickAction(actionType: String) {
         liveSessionManager.sendTutorQuickAction(actionType)
+    }
+
+    fun playMessageVoiceClip(filePath: String, speed: Float = 1.0f) {
+        liveSessionManager.playSavedVoiceClip(filePath = filePath, speed = speed)
+    }
+
+    fun saveMessageToTutorNotebook(assistantMessage: ChatMessage) {
+        val state = _uiState.value
+        val userMsg = state.currentSession.messages.lastOrNull {
+            it.turnIndex == assistantMessage.turnIndex && it.role == MessageRole.USER
+        }
+        val entry = TutorNotebookEntry(
+            languageCode = state.settings.tutorTargetLanguage,
+            aiSentence = assistantMessage.text.trim(),
+            userSentence = userMsg?.text?.trim().orEmpty(),
+            coachNotes = assistantMessage.backendThinkingText.trim()
+        )
+        viewModelScope.launch {
+            val updated = repository.saveNotebookEntry(entry)
+            _uiState.update {
+                it.copy(
+                    tutorNotebook = updated,
+                    errorToast = "⭐ 已收錄至外語複習本！（共 ${updated.size} 筆）"
+                )
+            }
+        }
+    }
+
+    fun deleteTutorNotebookEntry(entryId: String) {
+        viewModelScope.launch {
+            val updated = repository.deleteNotebookEntry(entryId)
+            _uiState.update { it.copy(tutorNotebook = updated) }
+        }
+    }
+
+    fun exportNotebookToAnki(entries: List<TutorNotebookEntry>): String {
+        return repository.exportNotebookToAnkiTsv(entries)
+    }
+
+    fun extractMemoryFromCurrentConversation(silent: Boolean = false) {
+        val state = _uiState.value
+        val msgs = state.currentSession.messages
+        if (msgs.isEmpty()) {
+            if (!silent) {
+                _uiState.update { it.copy(errorToast = "目前對話尚無內容可供提煉記憶") }
+            }
+            return
+        }
+        if (state.isExtractingMemory) return
+        _uiState.update { it.copy(isExtractingMemory = true) }
+        viewModelScope.launch {
+            val res = backendLlmClient.extractAndMergeUserMemory(
+                settings = state.settings,
+                messages = msgs
+            )
+            res.onSuccess { mergedMemory ->
+                val newSettings = _uiState.value.settings.copy(userMemoryProfile = mergedMemory)
+                repository.saveSettings(newSettings)
+                _uiState.update {
+                    it.copy(
+                        settings = newSettings,
+                        isExtractingMemory = false,
+                        errorToast = if (silent) null else "🧠 已從對話自動提煉並更新長期記憶庫！"
+                    )
+                }
+            }.onFailure { err ->
+                _uiState.update {
+                    it.copy(
+                        isExtractingMemory = false,
+                        errorToast = if (silent) null else "提煉記憶失敗: ${err.message}"
+                    )
+                }
+            }
+        }
+    }
+
+    private fun triggerBackgroundMemoryExtractionIfNeeded() {
+        val state = _uiState.value
+        if (!state.settings.longTermMemoryEnabled) return
+        val userTurns = state.currentSession.messages.count { it.role == MessageRole.USER && it.text.length >= 4 }
+        if (userTurns >= 3) {
+            extractMemoryFromCurrentConversation(silent = true)
+        }
+    }
+
+    fun sendImageMessage(bitmap: android.graphics.Bitmap, userPrompt: String) {
+        val state = _uiState.value
+        if (state.isAnalyzingImage) return
+        _uiState.update { it.copy(isAnalyzingImage = true, statusBanner = "📷 正在壓縮並傳送圖片至後端視覺模型 (${state.settings.backendBrainModel})...") }
+
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                // Scale bitmap down to max 1152px on longest side for fast Vision upload
+                val maxDim = 1152
+                val w = bitmap.width.coerceAtLeast(1)
+                val h = bitmap.height.coerceAtLeast(1)
+                val scaledBitmap = if (w > maxDim || h > maxDim) {
+                    val ratio = minOf(maxDim.toFloat() / w, maxDim.toFloat() / h)
+                    android.graphics.Bitmap.createScaledBitmap(
+                        bitmap,
+                        (w * ratio).toInt().coerceAtLeast(1),
+                        (h * ratio).toInt().coerceAtLeast(1),
+                        true
+                    )
+                } else {
+                    bitmap
+                }
+
+                val baos = java.io.ByteArrayOutputStream()
+                scaledBitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 84, baos)
+                val jpegBytes = baos.toByteArray()
+                val base64Jpeg = android.util.Base64.encodeToString(jpegBytes, android.util.Base64.NO_WRAP)
+
+                val imgDir = java.io.File(getApplication<Application>().filesDir, "chat_images").apply { mkdirs() }
+                val imgFile = java.io.File(imgDir, "img_${System.currentTimeMillis()}.jpg")
+                imgFile.writeBytes(jpegBytes)
+                // Prune old images if > 40
+                val allImgs = imgDir.listFiles()?.sortedByDescending { it.lastModified() }.orEmpty()
+                if (allImgs.size > 40) {
+                    allImgs.drop(40).forEach { runCatching { it.delete() } }
+                }
+
+                val isConnected = _uiState.value.connectionState != ConnectionState.DISCONNECTED
+                val turnIdx = if (isConnected) {
+                    liveSessionManager.allocateNextTurnIndexForVision()
+                } else {
+                    (_uiState.value.currentSession.messages.maxOfOrNull { it.turnIndex } ?: _uiState.value.currentSession.messages.size) + 1
+                }
+
+                val mode = state.settings.appMode
+                val displayPrompt = userPrompt.trim().ifBlank {
+                    when (mode) {
+                        AppMode.TUTOR -> "📷 [拍照/傳圖] 請看這張圖跟我練習外語對話，並幫我標註讀音與翻譯"
+                        AppMode.TRANSLATE -> "📷 [拍照/傳圖] 請翻譯圖片中的所有文字"
+                        AppMode.ASSISTANT -> "📷 [拍照/傳圖] 請解析這張圖片內容"
+                    }
+                }
+
+                // Add User bubble with attached imageLocalPath
+                _uiState.update { cur ->
+                    val msgs = cur.currentSession.messages.toMutableList()
+                    msgs.add(
+                        ChatMessage(
+                            streamKey = "vision_user_$turnIdx",
+                            turnIndex = turnIdx,
+                            role = MessageRole.USER,
+                            text = displayPrompt,
+                            imageLocalPath = imgFile.absolutePath,
+                            modelTag = "📷 視覺輸入"
+                        )
+                    )
+                    cur.copy(
+                        currentSession = cur.currentSession.copy(
+                            updatedAt = System.currentTimeMillis(),
+                            messages = sortMessagesByTurn(msgs)
+                        )
+                    )
+                }
+                persistCurrentSession()
+
+                val visionTaskPrompt = when (mode) {
+                    AppMode.TUTOR -> {
+                        val langLabel = AppSettings.tutorLanguageLabel(state.settings.tutorTargetLanguage)
+                        val isJa = state.settings.tutorTargetLanguage == "ja"
+                        val readingNote = if (isJa) "（所有日文漢字請務必加上括號標註平假名讀音，如：本日(ほんじつ)のおすすめ）" else ""
+                        """使用者正在練習【$langLabel】（程度：${state.settings.tutorLevel.shortLabel}），並傳送了一張照片。
+使用者補充需求：「${userPrompt.ifBlank { "請解析圖片中的外語內容並與我進行情境對話練習" }}」
+請用繁體中文整理以下三個區塊：
+📖 【圖片外語文字辨識、標音與中譯】$readingNote
+• 列出圖片中的重點外語文字／菜單／路牌內容、讀音與繁體中文翻譯。
+
+🔑 【圖片重點單字與實用知識】
+• 挑出圖片中最值得學的 2～3 個單字或文化小知識。
+
+🗣️ 【看著這張圖，你可以這樣開口說（可直接照唸！）】
+• 提供 2 句符合這張圖片情境（例如點這張菜單上的菜、詢問這張告示牌）的【$langLabel】造句範例$readingNote 與中文意思！"""
+                    }
+                    AppMode.TRANSLATE -> {
+                        val targetLabel = AppSettings.languageLabel(state.settings.translationTargetLanguage)
+                        """請辨識這張圖片中的所有文字，並完整、清晰地翻譯為目標語言：【$targetLabel】。
+請以「原文 ➔ 翻譯」對照方式排版（若包含日文漢字，請保留原文日文漢字並附上讀音）。
+使用者補充說明：${userPrompt.ifBlank { "無" }}"""
+                    }
+                    AppMode.ASSISTANT -> {
+                        userPrompt.ifBlank {
+                            "請詳細解析這張圖片的內容與重點；若圖片包含活動日期、時間或行程，請清楚列出（若使用者要求加入行事曆，請直接呼叫行事曆工具）。"
+                        }
+                    }
+                }
+
+                val res = backendLlmClient.runDelegatedTask(
+                    settings = state.settings,
+                    conversationHistory = _uiState.value.currentSession.messages,
+                    taskHint = visionTaskPrompt,
+                    imageBase64 = base64Jpeg,
+                    onSearchExecuted = { searchRes ->
+                        onSearchCardAdded(searchRes, turnIdx)
+                    },
+                    onCalendarActionLogged = { calNote ->
+                        onTranscriptDelta(
+                            role = MessageRole.SYSTEM,
+                            delta = calNote,
+                            timelineMs = System.currentTimeMillis(),
+                            modelTag = "Android Calendar",
+                            streamKey = "vision_cal_$turnIdx",
+                            turnIndex = turnIdx
+                        )
+                    }
+                )
+
+                res.onSuccess { brain ->
+                    if (mode == AppMode.TUTOR) {
+                        onTranscriptDelta(
+                            role = MessageRole.BACKEND_BRAIN,
+                            delta = brain.detailedNotes,
+                            timelineMs = System.currentTimeMillis(),
+                            modelTag = "🎓 圖片外語解析 (${state.settings.backendBrainModel})",
+                            streamKey = "tutor_coach_replace_$turnIdx",
+                            turnIndex = turnIdx
+                        )
+                        if (_uiState.value.connectionState != ConnectionState.DISCONNECTED) {
+                            val langLabel = AppSettings.tutorLanguageLabel(state.settings.tutorTargetLanguage)
+                            liveSessionManager.injectVisionResultIntoActiveVoiceSession(
+                                "[視覺情境輸入] 使用者剛才傳了一張照片，內容解析如下：\n${brain.detailedNotes.take(900)}\n請立刻根據這張照片的內容，用自然的【$langLabel】（程度：${state.settings.tutorLevel.shortLabel}）跟使用者開口互動或扮演店員/當地人提問！"
+                            )
+                        } else {
+                            onTranscriptDelta(
+                                role = MessageRole.ASSISTANT_VOICE,
+                                delta = "📷 已為你解析圖片中的外語內容與造句提示（請見上方家教卡片）！點擊下方「開始外語口說陪練」即可直接針對這張圖片跟 AI 開口對練。",
+                                timelineMs = System.currentTimeMillis(),
+                                modelTag = "🎓 AI 外語家教",
+                                streamKey = "vision_voice_$turnIdx",
+                                turnIndex = turnIdx
+                            )
+                        }
+                    } else {
+                        onTranscriptDelta(
+                            role = MessageRole.BACKEND_BRAIN,
+                            delta = brain.detailedNotes,
+                            timelineMs = System.currentTimeMillis(),
+                            modelTag = "📷 視覺解析 (${state.settings.backendBrainModel})",
+                            streamKey = "vision_backend_$turnIdx",
+                            turnIndex = turnIdx
+                        )
+                        if (_uiState.value.connectionState != ConnectionState.DISCONNECTED &&
+                            state.settings.protocol != LiveProtocol.OPENAI_TRANSLATE
+                        ) {
+                            liveSessionManager.injectVisionResultIntoActiveVoiceSession(
+                                "[圖片解析結果] 使用者傳了一張圖片，內容為：\n${brain.spokenSummary.take(1000)}\n請用自然簡潔的口語向使用者說明重點。"
+                            )
+                        } else {
+                            onTranscriptDelta(
+                                role = MessageRole.ASSISTANT_VOICE,
+                                delta = brain.spokenSummary,
+                                timelineMs = System.currentTimeMillis(),
+                                modelTag = if (mode == AppMode.TRANSLATE) "🌐 圖片翻譯" else state.settings.backendBrainModel,
+                                streamKey = "vision_voice_$turnIdx",
+                                turnIndex = turnIdx
+                            )
+                        }
+                    }
+                    onTurnCompleted()
+                    _uiState.update { it.copy(isAnalyzingImage = false, statusBanner = "📷 圖片解析完成") }
+                }.onFailure { err ->
+                    _uiState.update {
+                        it.copy(
+                            isAnalyzingImage = false,
+                            statusBanner = "圖片解析失敗: ${err.message}",
+                            errorToast = "圖片解析失敗: ${err.message}"
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(
+                        isAnalyzingImage = false,
+                        errorToast = "處理圖片時發生錯誤: ${e.message}"
+                    )
+                }
+            }
+        }
     }
 
     fun setTranslationTargetLanguage(langCode: String) {
@@ -312,6 +599,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
         if (_uiState.value.connectionState != ConnectionState.DISCONNECTED) {
             liveSessionManager.disconnectImmediate()
         }
+        triggerBackgroundMemoryExtractionIfNeeded()
         persistCurrentSession()
         val s = _uiState.value.settings
         val timeLabel = SimpleDateFormat("MM/dd HH:mm", Locale.getDefault()).format(Date())
@@ -633,6 +921,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
                     messages = orderedMsgs
                 )
             )
+        }
+        persistCurrentSession()
+    }
+
+    override fun onVoiceClipSaved(turnIndex: Int, clipFilePath: String) {
+        _uiState.update { state ->
+            val currentMsgs = state.currentSession.messages.toMutableList()
+            val idx = currentMsgs.indexOfLast {
+                it.turnIndex == turnIndex && it.role == MessageRole.ASSISTANT_VOICE
+            }
+            if (idx >= 0) {
+                currentMsgs[idx] = currentMsgs[idx].copy(audioClipPath = clipFilePath)
+                state.copy(
+                    currentSession = state.currentSession.copy(
+                        messages = currentMsgs
+                    )
+                )
+            } else {
+                state
+            }
         }
         persistCurrentSession()
     }

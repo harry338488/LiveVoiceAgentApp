@@ -4,8 +4,12 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.*
@@ -15,6 +19,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -38,7 +43,9 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -89,10 +96,12 @@ fun MainScreen(
     val uiState by viewModel.uiState.collectAsState()
     val context = LocalContext.current
     var selectedTab by remember { mutableIntStateOf(0) }
+    var showMemoryDialog by remember { mutableStateOf(false) }
 
     val currentMode = uiState.settings.appMode
     val isTranslationMode = currentMode == AppMode.TRANSLATE
     val isTutorMode = currentMode == AppMode.TUTOR
+    val hasActiveMemory = uiState.settings.longTermMemoryEnabled && uiState.settings.userMemoryProfile.isNotBlank()
 
     LaunchedEffect(uiState.errorToast) {
         uiState.errorToast?.let { msg ->
@@ -182,6 +191,23 @@ fun MainScreen(
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
+                        }
+
+                        // Long-Term Memory Hub Button
+                        IconButton(onClick = { showMemoryDialog = true }) {
+                            BadgedBox(
+                                badge = {
+                                    if (hasActiveMemory) {
+                                        Badge(containerColor = VioletAccent)
+                                    }
+                                }
+                            ) {
+                                Icon(
+                                    Icons.Default.Psychology,
+                                    contentDescription = "跨對話長期記憶庫",
+                                    tint = if (hasActiveMemory) VioletAccent else Color(0xFF94A3B8)
+                                )
+                            }
                         }
 
                         if (selectedTab == 0) {
@@ -307,7 +333,12 @@ fun MainScreen(
                     onToggleCall = onRequestMicPermissionAndToggleCall,
                     onToggleMute = { viewModel.toggleMute() },
                     onToggleSpeaker = { viewModel.toggleSpeakerphone() },
-                    onSendTypedMessage = { viewModel.sendTypedMessage(it) }
+                    onSendTypedMessage = { viewModel.sendTypedMessage(it) },
+                    onSendImageMessage = { bmp, prompt -> viewModel.sendImageMessage(bmp, prompt) },
+                    onPlayMessageVoiceClip = { path, speed -> viewModel.playMessageVoiceClip(path, speed) },
+                    onSaveMessageToNotebook = { msg -> viewModel.saveMessageToTutorNotebook(msg) },
+                    onDeleteNotebookEntry = { id -> viewModel.deleteTutorNotebookEntry(id) },
+                    onExportNotebookAnki = { viewModel.exportNotebookToAnki() }
                 )
 
                 1 -> HistorySessionsTab(
@@ -328,10 +359,29 @@ fun MainScreen(
                 2 -> SettingsAndModelFetchTab(
                     uiState = uiState,
                     onUpdateSettings = { viewModel.updateSettings(it) },
-                    onFetchModels = { viewModel.fetchModelsFromApis() }
+                    onFetchModels = { viewModel.fetchModelsFromApis() },
+                    onOpenMemoryHub = { showMemoryDialog = true }
                 )
             }
         }
+    }
+
+    if (showMemoryDialog) {
+        LongTermMemoryDialog(
+            settings = uiState.settings,
+            isExtracting = uiState.isExtractingMemory,
+            onDismiss = { showMemoryDialog = false },
+            onExtractFromCurrentSession = { viewModel.extractMemoryFromCurrentConversation() },
+            onSave = { enabled, newProfile ->
+                viewModel.updateSettings(
+                    uiState.settings.copy(
+                        longTermMemoryEnabled = enabled,
+                        userMemoryProfile = newProfile
+                    )
+                )
+                showMemoryDialog = false
+            }
+        )
     }
 }
 
@@ -348,7 +398,12 @@ private fun LiveConversationTab(
     onToggleCall: () -> Unit,
     onToggleMute: () -> Unit,
     onToggleSpeaker: () -> Unit,
-    onSendTypedMessage: (String) -> Unit
+    onSendTypedMessage: (String) -> Unit,
+    onSendImageMessage: (Bitmap, String) -> Unit,
+    onPlayMessageVoiceClip: (String, Float) -> Unit,
+    onSaveMessageToNotebook: (ChatMessage) -> Unit,
+    onDeleteNotebookEntry: (String) -> Unit,
+    onExportNotebookAnki: () -> String
 ) {
     val listState = rememberLazyListState()
     val context = LocalContext.current
@@ -358,6 +413,9 @@ private fun LiveConversationTab(
     val isTranslationMode = currentMode == AppMode.TRANSLATE
     val isTutorMode = currentMode == AppMode.TUTOR
     val messages = uiState.currentSession.messages
+    val savedNotebookSentences = remember(uiState.tutorNotebook) {
+        uiState.tutorNotebook.mapTo(hashSetOf()) { it.targetSentence.trim() }
+    }
 
     LaunchedEffect(messages.size, messages.lastOrNull()?.text?.length, messages.lastOrNull()?.backendThinkingText?.length) {
         if (messages.isNotEmpty()) {
@@ -395,8 +453,11 @@ private fun LiveConversationTab(
             LanguageTutorControlBar(
                 settings = uiState.settings,
                 isConnected = uiState.connectionState != ConnectionState.DISCONNECTED,
+                notebookEntries = uiState.tutorNotebook,
                 onUpdateTutorConfig = onUpdateTutorConfig,
-                onTriggerTutorQuickAction = onTriggerTutorQuickAction
+                onTriggerTutorQuickAction = onTriggerTutorQuickAction,
+                onDeleteNotebookEntry = onDeleteNotebookEntry,
+                onExportNotebookAnki = onExportNotebookAnki
             )
         }
 
@@ -435,6 +496,7 @@ private fun LiveConversationTab(
                 items(messages, key = { it.id }) { msg ->
                     ChatMessageItem(
                         message = msg,
+                        isSavedInNotebook = savedNotebookSentences.contains(msg.text.trim()),
                         onCopyText = { text ->
                             copyToClipboard(context, "Message", text)
                             Toast.makeText(context, "已複製內容", Toast.LENGTH_SHORT).show()
@@ -443,7 +505,9 @@ private fun LiveConversationTab(
                             runCatching {
                                 context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
                             }
-                        }
+                        },
+                        onPlayVoiceClip = onPlayMessageVoiceClip,
+                        onSaveToNotebook = { onSaveMessageToNotebook(msg) }
                     )
                 }
             }
@@ -465,7 +529,8 @@ private fun LiveConversationTab(
                     onSendTypedMessage(typedInput)
                     typedInput = ""
                 }
-            }
+            },
+            onSendImageMessage = onSendImageMessage
         )
     }
 }
@@ -619,12 +684,17 @@ private fun ModeSegmentedSwitcher(
 private fun LanguageTutorControlBar(
     settings: AppSettings,
     isConnected: Boolean,
+    notebookEntries: List<TutorNotebookEntry>,
     onUpdateTutorConfig: (AppSettings, Boolean) -> Unit,
-    onTriggerTutorQuickAction: (String) -> Unit
+    onTriggerTutorQuickAction: (String) -> Unit,
+    onDeleteNotebookEntry: (String) -> Unit,
+    onExportNotebookAnki: () -> String
 ) {
+    val context = LocalContext.current
     val langScroll = rememberScrollState()
     val scenarioScroll = rememberScrollState()
     var showCustomScenarioDialog by remember { mutableStateOf(false) }
+    var showNotebookDialog by remember { mutableStateOf(false) }
 
     Surface(
         modifier = Modifier
@@ -635,7 +705,7 @@ private fun LanguageTutorControlBar(
         border = BorderStroke(1.dp, AmberTutorAccent.copy(alpha = 0.42f))
     ) {
         Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
-            // 1. Header + Auto-Coach Toggle Pill
+            // 1. Header + Auto-Coach Toggle Pill + Notebook Pill
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth()
@@ -648,10 +718,35 @@ private fun LanguageTutorControlBar(
                         color = Color.White
                     )
                     Text(
-                        text = "不會講的單字直接夾雜中文說！後端自動生成假名標音・糾錯・下一句提示",
+                        text = "不會講的單字直接夾雜中文說！點擊氣泡可 0.75x 慢速跟讀與收錄複習本",
                         style = MaterialTheme.typography.labelSmall,
                         color = Color(0xFFCBD5E1)
                     )
+                }
+
+                Spacer(modifier = Modifier.width(6.dp))
+
+                // Notebook Button
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = if (notebookEntries.isNotEmpty()) VioletAccent.copy(alpha = 0.25f) else Color(0xFF1E293B),
+                    border = BorderStroke(
+                        1.dp,
+                        if (notebookEntries.isNotEmpty()) VioletAccent else Color.White.copy(alpha = 0.15f)
+                    ),
+                    modifier = Modifier.clickable { showNotebookDialog = true }
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "📒 複習本 (${notebookEntries.size})",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = if (notebookEntries.isNotEmpty()) Color(0xFFE9D5FF) else Color(0xFFCBD5E1)
+                        )
+                    }
                 }
 
                 Spacer(modifier = Modifier.width(6.dp))
@@ -675,7 +770,7 @@ private fun LanguageTutorControlBar(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = if (settings.tutorAutoCoachEnabled) "📖 假名/糾錯卡: 開" else "📖 假名/糾錯卡: 關",
+                            text = if (settings.tutorAutoCoachEnabled) "📖 解析: 開" else "📖 解析: 關",
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.Bold,
                             color = if (settings.tutorAutoCoachEnabled) Color(0xFFFDE68A) else Color(0xFF94A3B8)
@@ -925,6 +1020,221 @@ private fun LanguageTutorControlBar(
             }
         )
     }
+
+    if (showNotebookDialog) {
+        TutorNotebookDialog(
+            settings = settings,
+            entries = notebookEntries,
+            onDismiss = { showNotebookDialog = false },
+            onToggleInjectWeaknesses = { enabled ->
+                onUpdateTutorConfig(settings.copy(tutorInjectNotebookWeaknesses = enabled), false)
+            },
+            onDeleteEntry = onDeleteNotebookEntry,
+            onExportAnki = {
+                val tsv = onExportNotebookAnki()
+                if (tsv.isBlank()) {
+                    Toast.makeText(context, "複習本目前是空的", Toast.LENGTH_SHORT).show()
+                } else {
+                    copyToClipboard(context, "Anki Flashcards TSV", tsv)
+                    Toast.makeText(context, "已複製 ${notebookEntries.size} 筆 Anki 字卡 (TSV 格式) 到剪貼簿！", Toast.LENGTH_LONG).show()
+                }
+            },
+            onCopyItem = { text ->
+                copyToClipboard(context, "Notebook Item", text)
+                Toast.makeText(context, "已複製句子與解析", Toast.LENGTH_SHORT).show()
+            }
+        )
+    }
+}
+
+@Composable
+private fun TutorNotebookDialog(
+    settings: AppSettings,
+    entries: List<TutorNotebookEntry>,
+    onDismiss: () -> Unit,
+    onToggleInjectWeaknesses: (Boolean) -> Unit,
+    onDeleteEntry: (String) -> Unit,
+    onExportAnki: () -> Unit,
+    onCopyItem: (String) -> Unit
+) {
+    val sdf = remember { SimpleDateFormat("MM/dd HH:mm", Locale.getDefault()) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xFF111827),
+        titleContentColor = Color.White,
+        textContentColor = Color(0xFFE2E8F0),
+        title = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(
+                    imageVector = Icons.Default.School,
+                    contentDescription = null,
+                    tint = AmberTutorAccent,
+                    modifier = Modifier.size(22.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "📒 外語單字＆錯題複習本 (${entries.size})",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 460.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                // Auto-inject weaknesses switch card
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = if (settings.tutorInjectNotebookWeaknesses) AmberTutorAccent.copy(alpha = 0.16f) else Color(0xFF1E293B),
+                    border = BorderStroke(
+                        1.dp,
+                        if (settings.tutorInjectNotebookWeaknesses) AmberTutorAccent.copy(alpha = 0.6f) else Color.White.copy(alpha = 0.1f)
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onToggleInjectWeaknesses(!settings.tutorInjectNotebookWeaknesses) }
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "🎯 通話時自動將複習本弱點出題考我",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                            Text(
+                                text = "開啟後，AI 家教會在對話中自然引導你複習下方收錄過的句型與單字",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFFCBD5E1)
+                            )
+                        }
+                        Switch(
+                            checked = settings.tutorInjectNotebookWeaknesses,
+                            onCheckedChange = onToggleInjectWeaknesses
+                        )
+                    }
+                }
+
+                if (entries.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 32.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "尚未收錄任何句子。\n在外語陪練對話中，點擊 AI 氣泡解析卡上的「⭐ 收錄複習本」即可一鍵加入！",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFF94A3B8),
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                } else {
+                    LazyColumn(
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.weight(1f, fill = false)
+                    ) {
+                        items(entries, key = { it.id }) { item ->
+                            val langShort = AppSettings.tutorLanguageLabel(item.targetLanguage).substringBefore(" (")
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = Color(0xFF1A2337),
+                                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(modifier = Modifier.padding(10.dp)) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Text(
+                                            text = "$langShort · ${item.scenarioLabel} · ${sdf.format(Date(item.createdAt))}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = AmberTutorAccent,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        IconButton(
+                                            onClick = {
+                                                onCopyItem("${item.targetSentence}\n\n${item.coachNotes}")
+                                            },
+                                            modifier = Modifier.size(26.dp)
+                                        ) {
+                                            Icon(
+                                                Icons.Default.ContentCopy,
+                                                contentDescription = "複製",
+                                                tint = Color(0xFFCBD5E1),
+                                                modifier = Modifier.size(15.dp)
+                                            )
+                                        }
+                                        IconButton(
+                                            onClick = { onDeleteEntry(item.id) },
+                                            modifier = Modifier.size(26.dp)
+                                        ) {
+                                            Icon(
+                                                Icons.Default.Delete,
+                                                contentDescription = "刪除",
+                                                tint = RoseDanger,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                    }
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = item.targetSentence,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.White
+                                    )
+                                    if (item.coachNotes.isNotBlank()) {
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Text(
+                                            text = item.coachNotes,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = Color(0xFFCBD5E1),
+                                            lineHeight = 18.sp
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            if (entries.isNotEmpty()) {
+                Button(
+                    onClick = onExportAnki,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = AmberTutorAccent,
+                        contentColor = Color(0xFF06101E)
+                    )
+                ) {
+                    Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("匯出 Anki 字卡 (TSV)", fontWeight = FontWeight.Bold)
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("關閉", color = Color(0xFF94A3B8))
+            }
+        }
+    )
 }
 
 @Composable
@@ -1747,11 +2057,13 @@ private fun FloatingBottomControlDock(
     onToggleCall: () -> Unit,
     onToggleMute: () -> Unit,
     onToggleSpeaker: () -> Unit,
-    onSendTypedMessage: () -> Unit
+    onSendTypedMessage: () -> Unit,
+    onSendImageMessage: (Bitmap, String) -> Unit
 ) {
     val isConnected = uiState.connectionState != ConnectionState.DISCONNECTED
     val isTranslationMode = currentMode == AppMode.TRANSLATE
     val isTutorMode = currentMode == AppMode.TUTOR
+    var showVisionDialog by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -1827,15 +2139,45 @@ private fun FloatingBottomControlDock(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 14.dp, vertical = 10.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                    .padding(horizontal = 10.dp, vertical = 9.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Left side: Keyboard Toggle (in AI Mode) + Mute Button
+                // Left side: Camera/Photo Vision Button + Keyboard Toggle
                 Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    // 📷 Multimodal Vision (Camera / Gallery) Button — active in all 3 modes
+                    Surface(
+                        shape = CircleShape,
+                        color = if (uiState.isAnalyzingImage) AmberTutorAccent.copy(alpha = 0.25f) else Color(0xFF1E293B),
+                        border = BorderStroke(
+                            1.dp,
+                            if (uiState.isAnalyzingImage) AmberTutorAccent else VioletAccent.copy(alpha = 0.45f)
+                        ),
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clickable { showVisionDialog = true }
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            if (uiState.isAnalyzingImage) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    strokeWidth = 2.dp,
+                                    color = AmberTutorAccent
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Default.PhotoCamera,
+                                    contentDescription = "拍照或上傳圖片解析",
+                                    tint = Color(0xFFE9D5FF),
+                                    modifier = Modifier.size(19.dp)
+                                )
+                            }
+                        }
+                    }
+
                     if (!isTranslationMode) {
                         Surface(
                             shape = CircleShape,
@@ -1845,7 +2187,7 @@ private fun FloatingBottomControlDock(
                                 if (showKeyboardBar) CyanAccent else Color.White.copy(alpha = 0.08f)
                             ),
                             modifier = Modifier
-                                .size(44.dp)
+                                .size(40.dp)
                                 .clickable { onToggleKeyboardBar() }
                         ) {
                             Box(contentAlignment = Alignment.Center) {
@@ -1853,35 +2195,9 @@ private fun FloatingBottomControlDock(
                                     imageVector = Icons.Default.Keyboard,
                                     contentDescription = "文字輸入",
                                     tint = if (showKeyboardBar) CyanAccent else Color(0xFFCBD5E1),
-                                    modifier = Modifier.size(20.dp)
+                                    modifier = Modifier.size(19.dp)
                                 )
                             }
-                        }
-                    }
-
-                    // Mute Circular Button
-                    Surface(
-                        shape = CircleShape,
-                        color = if (uiState.isMuted) RoseDanger.copy(alpha = 0.22f) else Color(0xFF1E293B),
-                        border = BorderStroke(
-                            1.dp,
-                            if (uiState.isMuted) RoseDanger else Color.White.copy(alpha = 0.08f)
-                        ),
-                        modifier = Modifier
-                            .size(44.dp)
-                            .clickable(enabled = isConnected) { onToggleMute() }
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Icon(
-                                imageVector = if (uiState.isMuted) Icons.Default.MicOff else Icons.Default.Mic,
-                                contentDescription = "靜音切換",
-                                tint = when {
-                                    !isConnected -> Color(0xFF475569)
-                                    uiState.isMuted -> RoseDanger
-                                    else -> Color(0xFFCBD5E1)
-                                },
-                                modifier = Modifier.size(20.dp)
-                            )
                         }
                     }
                 }
@@ -1896,10 +2212,11 @@ private fun FloatingBottomControlDock(
 
                 Box(
                     modifier = Modifier
+                        .weight(1f)
                         .clip(RoundedCornerShape(50))
                         .background(mainBtnBrush)
                         .clickable { onToggleCall() }
-                        .padding(horizontal = 24.dp, vertical = 13.dp),
+                        .padding(horizontal = 12.dp, vertical = 12.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1912,56 +2229,316 @@ private fun FloatingBottomControlDock(
                             },
                             contentDescription = null,
                             tint = if (isConnected) Color.White else Color(0xFF04101E),
-                            modifier = Modifier.size(20.dp)
+                            modifier = Modifier.size(19.dp)
                         )
-                        Spacer(modifier = Modifier.width(8.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
                         Text(
                             text = when {
                                 isConnected && isTutorMode -> "結束外語陪練"
                                 isConnected && isTranslationMode -> "停止同步口譯"
                                 isConnected -> "結束語音通話"
-                                isTutorMode -> "開始外語口說陪練"
+                                isTutorMode -> "開始外語陪練"
                                 isTranslationMode -> "開始同步口譯"
                                 else -> "開始全雙工對話"
                             },
                             fontWeight = FontWeight.Bold,
-                            fontSize = 15.sp,
+                            fontSize = 14.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                             color = if (isConnected) Color.White else Color(0xFF04101E)
                         )
                     }
                 }
 
-                // Right side: Speakerphone / Earpiece Toggle
-                Surface(
-                    shape = CircleShape,
-                    color = if (uiState.isSpeakerphoneOn) CyanAccent.copy(alpha = 0.18f) else Color(0xFF1E293B),
-                    border = BorderStroke(
-                        1.dp,
-                        if (uiState.isSpeakerphoneOn) CyanAccent.copy(alpha = 0.5f) else Color.White.copy(alpha = 0.08f)
-                    ),
-                    modifier = Modifier
-                        .size(44.dp)
-                        .clickable { onToggleSpeaker() }
+                // Right side: Mute Button + Speakerphone / Earpiece Toggle
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            imageVector = if (uiState.isSpeakerphoneOn) Icons.Default.VolumeUp else Icons.Default.PhoneInTalk,
-                            contentDescription = if (uiState.isSpeakerphoneOn) "擴音" else "聽筒",
-                            tint = if (uiState.isSpeakerphoneOn) CyanAccent else Color(0xFFCBD5E1),
-                            modifier = Modifier.size(20.dp)
-                        )
+                    // Mute Circular Button
+                    Surface(
+                        shape = CircleShape,
+                        color = if (uiState.isMuted) RoseDanger.copy(alpha = 0.22f) else Color(0xFF1E293B),
+                        border = BorderStroke(
+                            1.dp,
+                            if (uiState.isMuted) RoseDanger else Color.White.copy(alpha = 0.08f)
+                        ),
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clickable(enabled = isConnected) { onToggleMute() }
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = if (uiState.isMuted) Icons.Default.MicOff else Icons.Default.Mic,
+                                contentDescription = "靜音切換",
+                                tint = when {
+                                    !isConnected -> Color(0xFF475569)
+                                    uiState.isMuted -> RoseDanger
+                                    else -> Color(0xFFCBD5E1)
+                                },
+                                modifier = Modifier.size(19.dp)
+                            )
+                        }
+                    }
+
+                    // Speakerphone Circular Button
+                    Surface(
+                        shape = CircleShape,
+                        color = if (uiState.isSpeakerphoneOn) CyanAccent.copy(alpha = 0.18f) else Color(0xFF1E293B),
+                        border = BorderStroke(
+                            1.dp,
+                            if (uiState.isSpeakerphoneOn) CyanAccent.copy(alpha = 0.5f) else Color.White.copy(alpha = 0.08f)
+                        ),
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clickable { onToggleSpeaker() }
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = if (uiState.isSpeakerphoneOn) Icons.Default.VolumeUp else Icons.Default.PhoneInTalk,
+                                contentDescription = if (uiState.isSpeakerphoneOn) "擴音" else "聽筒",
+                                tint = if (uiState.isSpeakerphoneOn) CyanAccent else Color(0xFFCBD5E1),
+                                modifier = Modifier.size(19.dp)
+                            )
+                        }
                     }
                 }
             }
         }
     }
+
+    if (showVisionDialog) {
+        VisionInputDialog(
+            currentMode = currentMode,
+            settings = uiState.settings,
+            onDismiss = { showVisionDialog = false },
+            onSendImage = { bmp, prompt ->
+                showVisionDialog = false
+                onSendImageMessage(bmp, prompt)
+            }
+        )
+    }
+}
+
+@Composable
+private fun VisionInputDialog(
+    currentMode: AppMode,
+    settings: AppSettings,
+    onDismiss: () -> Unit,
+    onSendImage: (Bitmap, String) -> Unit
+) {
+    val context = LocalContext.current
+    var selectedBitmap by remember { mutableStateOf<Bitmap?>(null) }
+
+    val defaultPrompt = remember(currentMode, settings.tutorTargetLanguage, settings.translationTargetLanguage) {
+        when (currentMode) {
+            AppMode.TUTOR -> {
+                val lang = AppSettings.tutorLanguageLabel(settings.tutorTargetLanguage).substringBefore(" (")
+                "請幫我辨識這張照片中的外文內容（附上假名標音與中文解釋），並用「$lang」扮演情境角色與我根據這張圖進行口說互動！"
+            }
+            AppMode.TRANSLATE -> {
+                val outLang = AppSettings.languageLabel(settings.translationTargetLanguage).substringBefore(" (")
+                "請完整辨識並將這張圖片上的所有文字翻譯成「$outLang」，同時將重點唸給我聽。"
+            }
+            AppMode.ASSISTANT -> {
+                "請幫我詳細解析這張照片的內容；如果圖中包含活動日期或時間，請詢問我或直接幫我加入手機行事曆。"
+            }
+        }
+    }
+    var customPrompt by remember(defaultPrompt) { mutableStateOf(defaultPrompt) }
+
+    val cameraLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicturePreview()
+    ) { bmp: Bitmap? ->
+        if (bmp != null) {
+            selectedBitmap = bmp
+        }
+    }
+
+    val galleryLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.openInputStream(uri)?.use { stream ->
+                    BitmapFactory.decodeStream(stream)
+                }
+            }.getOrNull()?.let { bmp ->
+                selectedBitmap = bmp
+            } ?: Toast.makeText(context, "無法讀取所選圖片", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    val quickPrompts = remember(currentMode) {
+        when (currentMode) {
+            AppMode.TUTOR -> listOf(
+                "🍱 看菜單用外語練習點餐",
+                "📖 幫我標註圖上日文漢字假名與文法",
+                "🗣️ 根據照片場景考我 3 個外語問題"
+            )
+            AppMode.TRANSLATE -> listOf(
+                "🌐 完整翻譯圖片文字並語音朗讀",
+                "🍽️ 翻譯這份菜單並解釋特色餐點",
+                "⚠️ 翻譯路標/告示牌的注意事項"
+            )
+            AppMode.ASSISTANT -> listOf(
+                "🔍 解析照片內容並連網查相關資訊",
+                "📅 辨識海報/傳單上的活動時間並加入行事曆",
+                "🧾 整理收據/文件重點表格"
+            )
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xFF111827),
+        titleContentColor = Color.White,
+        textContentColor = Color(0xFFE2E8F0),
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.PhotoCamera,
+                    contentDescription = null,
+                    tint = CyanAccent,
+                    modifier = Modifier.size(22.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "📷 多模態視覺輸入 (拍照 / 相簿選圖)",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = "拍下日本菜單、路標、講義或活動海報，後端大腦將立即進行視覺解析，若在通話中更會直接由 AI 語音與你互動！",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFF94A3B8)
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = { cameraLauncher.launch(null) },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = CyanAccent,
+                            contentColor = Color(0xFF06101E)
+                        ),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Default.PhotoCamera, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("拍照", fontWeight = FontWeight.Bold)
+                    }
+
+                    Button(
+                        onClick = { galleryLauncher.launch("image/*") },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = VioletAccent,
+                            contentColor = Color.White
+                        ),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Default.Image, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("相簿選圖", fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                selectedBitmap?.let { bmp ->
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = Color(0xFF090E1A),
+                        border = BorderStroke(1.dp, CyanAccent.copy(alpha = 0.45f)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(170.dp)
+                    ) {
+                        Image(
+                            bitmap = bmp.asImageBitmap(),
+                            contentDescription = "已選擇的圖片預覽",
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                }
+
+                // Quick prompt chips
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    quickPrompts.forEach { preset ->
+                        Surface(
+                            shape = RoundedCornerShape(50),
+                            color = Color(0xFF1E293B),
+                            border = BorderStroke(1.dp, CyanAccent.copy(alpha = 0.35f)),
+                            modifier = Modifier.clickable { customPrompt = preset }
+                        ) {
+                            Text(
+                                text = preset,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFFBAE6FD),
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                            )
+                        }
+                    }
+                }
+
+                OutlinedTextField(
+                    value = customPrompt,
+                    onValueChange = { customPrompt = it },
+                    label = { Text("想讓 AI 針對這張圖做什麼？") },
+                    minLines = 2,
+                    maxLines = 4,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val bmp = selectedBitmap
+                    if (bmp != null) {
+                        onSendImage(bmp, customPrompt.trim())
+                    }
+                },
+                enabled = selectedBitmap != null,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = EmeraldAccent,
+                    contentColor = Color(0xFF042F2E)
+                )
+            ) {
+                Text("🚀 傳送圖片並解析", fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消", color = Color(0xFF94A3B8))
+            }
+        }
+    )
 }
 
 @Composable
 private fun ChatMessageItem(
     message: ChatMessage,
+    isSavedInNotebook: Boolean,
     onCopyText: (String) -> Unit,
-    onOpenUrl: (String) -> Unit
+    onOpenUrl: (String) -> Unit,
+    onPlayVoiceClip: (String, Float) -> Unit,
+    onSaveToNotebook: () -> Unit
 ) {
     val timeStr = remember(message.timestampMs) {
         SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(message.timestampMs))
@@ -1974,8 +2551,18 @@ private fun ChatMessageItem(
     // Auto-expand the Tutor Coach card so the user immediately sees Furigana readings, translation & next reply hints!
     var isThinkingExpanded by remember(message.id, isTutorBubble) { mutableStateOf(isTutorBubble) }
 
+    val attachedImageBitmap = remember(message.imageLocalPath) {
+        val path = message.imageLocalPath
+        if (!path.isNullOrBlank()) {
+            runCatching { BitmapFactory.decodeFile(path) }.getOrNull()
+        } else {
+            null
+        }
+    }
+
     val roleLabel = when {
         isUser -> when {
+            message.modelTag.contains("視覺") -> "📷 你的拍照/圖片提問"
             message.modelTag.contains("原音") -> "🎙️ 原音辨識"
             message.modelTag.contains("口說") -> "🗣️ 你的口說練習"
             else -> "🗣️ 你"
@@ -2084,6 +2671,26 @@ private fun ChatMessageItem(
                                 onCopyText(fullCopy)
                             }
                     )
+                }
+
+                // Attached Image Thumbnail (if present)
+                if (attachedImageBitmap != null) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = Color(0xFF090E1A),
+                        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.18f)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 190.dp)
+                    ) {
+                        Image(
+                            bitmap = attachedImageBitmap.asImageBitmap(),
+                            contentDescription = "上傳圖片",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
                 }
 
                 // Embedded Perplexity / DeepSeek R1 style "Thinking Mode" or "Language Tutor Coach" collapsible drawer
@@ -2226,7 +2833,7 @@ private fun ChatMessageItem(
                                         Spacer(modifier = Modifier.height(6.dp))
                                     }
 
-                                    // 4. Backend Brain Detailed Notes
+                                    // 4. Backend Brain Detailed Notes + 1-Tap Save to Tutor Notebook
                                     if (message.backendThinkingText.isNotBlank()) {
                                         Spacer(modifier = Modifier.height(4.dp))
                                         Row(
@@ -2240,6 +2847,26 @@ private fun ChatMessageItem(
                                                 color = VioletAccent,
                                                 modifier = Modifier.weight(1f)
                                             )
+                                            if (isTutorBubble) {
+                                                Surface(
+                                                    shape = RoundedCornerShape(50),
+                                                    color = if (isSavedInNotebook) EmeraldAccent.copy(alpha = 0.22f) else AmberTutorAccent.copy(alpha = 0.22f),
+                                                    border = BorderStroke(
+                                                        1.dp,
+                                                        if (isSavedInNotebook) EmeraldAccent else AmberTutorAccent
+                                                    ),
+                                                    modifier = Modifier.clickable { onSaveToNotebook() }
+                                                ) {
+                                                    Text(
+                                                        text = if (isSavedInNotebook) "✅ 已收錄複習本" else "⭐ 收錄複習本",
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = if (isSavedInNotebook) EmeraldAccent else Color(0xFFFDE68A),
+                                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                                    )
+                                                }
+                                                Spacer(modifier = Modifier.width(8.dp))
+                                            }
                                             Text(
                                                 text = "複製筆記",
                                                 style = MaterialTheme.typography.labelSmall,
@@ -2281,6 +2908,69 @@ private fun ChatMessageItem(
                         style = MaterialTheme.typography.bodySmall,
                         color = Color(0xFF94A3B8)
                     )
+                }
+
+                // 5. Audio Replay & 0.75x Slow Shadowing Bar (for AI voice turns with saved PCM audio) + Save to Notebook shortcut
+                val clipPath = message.audioClipPath
+                if (message.role == MessageRole.ASSISTANT_VOICE && (!clipPath.isNullOrBlank() || isTutorBubble)) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (!clipPath.isNullOrBlank()) {
+                            Surface(
+                                shape = RoundedCornerShape(50),
+                                color = CyanAccent.copy(alpha = 0.16f),
+                                border = BorderStroke(1.dp, CyanAccent.copy(alpha = 0.45f)),
+                                modifier = Modifier.clickable { onPlayVoiceClip(clipPath, 1.0f) }
+                            ) {
+                                Text(
+                                    text = "🔊 原音重播",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFFBAE6FD),
+                                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
+                                )
+                            }
+
+                            Surface(
+                                shape = RoundedCornerShape(50),
+                                color = VioletAccent.copy(alpha = 0.18f),
+                                border = BorderStroke(1.dp, VioletAccent.copy(alpha = 0.45f)),
+                                modifier = Modifier.clickable { onPlayVoiceClip(clipPath, 0.75f) }
+                            ) {
+                                Text(
+                                    text = "🐢 0.75x 跟讀",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFFE9D5FF),
+                                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
+                                )
+                            }
+                        }
+
+                        if (isTutorBubble && message.text.isNotBlank()) {
+                            Surface(
+                                shape = RoundedCornerShape(50),
+                                color = if (isSavedInNotebook) EmeraldAccent.copy(alpha = 0.18f) else AmberTutorAccent.copy(alpha = 0.18f),
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (isSavedInNotebook) EmeraldAccent.copy(alpha = 0.5f) else AmberTutorAccent.copy(alpha = 0.5f)
+                                ),
+                                modifier = Modifier.clickable { onSaveToNotebook() }
+                            ) {
+                                Text(
+                                    text = if (isSavedInNotebook) "✅ 已收錄" else "⭐ 收錄複習",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isSavedInNotebook) EmeraldAccent else Color(0xFFFDE68A),
+                                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2452,7 +3142,8 @@ private fun HistorySessionsTab(
 private fun SettingsAndModelFetchTab(
     uiState: UiState,
     onUpdateSettings: (AppSettings) -> Unit,
-    onFetchModels: () -> Unit
+    onFetchModels: () -> Unit,
+    onOpenMemoryHub: () -> Unit
 ) {
     val s = uiState.settings
     val scrollState = rememberScrollState()
@@ -2465,6 +3156,79 @@ private fun SettingsAndModelFetchTab(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
+        // 0. Cross-Session Long-Term Memory Hub Card
+        Surface(
+            shape = RoundedCornerShape(18.dp),
+            color = AssistantCardBg,
+            border = BorderStroke(1.dp, VioletAccent.copy(alpha = 0.45f)),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Psychology,
+                        contentDescription = null,
+                        tint = VioletAccent,
+                        modifier = Modifier.size(22.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "🧠 跨對話長期記憶庫 (Long-Term Memory)",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                        Text(
+                            text = "讓 AI 跨對話記住你的背景、語言程度、旅遊計畫與個人偏好",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFF94A3B8)
+                        )
+                    }
+                    Switch(
+                        checked = s.longTermMemoryEnabled,
+                        onCheckedChange = { onUpdateSettings(s.copy(longTermMemoryEnabled = it)) }
+                    )
+                }
+
+                if (s.userMemoryProfile.isNotBlank()) {
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = Color(0xFF090E1A).copy(alpha = 0.7f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = s.userMemoryProfile,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFFE2E8F0),
+                            maxLines = 4,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(10.dp)
+                        )
+                    }
+                }
+
+                Button(
+                    onClick = onOpenMemoryHub,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = VioletAccent,
+                        contentColor = Color.White
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("開啟長期記憶庫管理 / 從對話自動萃取記憶", fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+
         // 1. API Keys Card
         Surface(
             shape = RoundedCornerShape(18.dp),
@@ -2908,6 +3672,143 @@ private fun DropdownSelectorField(
             }
         }
     }
+}
+
+@Composable
+private fun LongTermMemoryDialog(
+    settings: AppSettings,
+    isExtracting: Boolean,
+    onDismiss: () -> Unit,
+    onExtractFromCurrentSession: () -> Unit,
+    onSave: (Boolean, String) -> Unit
+) {
+    var enabled by remember(settings.longTermMemoryEnabled) {
+        mutableStateOf(settings.longTermMemoryEnabled)
+    }
+    var memoryText by remember(settings.userMemoryProfile) {
+        mutableStateOf(settings.userMemoryProfile)
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xFF111827),
+        titleContentColor = Color.White,
+        textContentColor = Color(0xFFE2E8F0),
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.Psychology,
+                    contentDescription = null,
+                    tint = VioletAccent,
+                    modifier = Modifier.size(22.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "🧠 跨對話長期記憶庫",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = if (enabled) VioletAccent.copy(alpha = 0.18f) else Color(0xFF1E293B),
+                    border = BorderStroke(
+                        1.dp,
+                        if (enabled) VioletAccent else Color.White.copy(alpha = 0.1f)
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { enabled = !enabled }
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "啟用跨對話個人記憶注入",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                            Text(
+                                text = "開啟後，無論開啟新對話、語音助理或外語家教，AI 都會記得下方你的個人背景與偏好",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFFCBD5E1)
+                            )
+                        }
+                        Switch(
+                            checked = enabled,
+                            onCheckedChange = { enabled = it }
+                        )
+                    }
+                }
+
+                Button(
+                    onClick = onExtractFromCurrentSession,
+                    enabled = !isExtracting,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = CyanAccent,
+                        contentColor = Color(0xFF06101E)
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    if (isExtracting) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                            color = Color(0xFF06101E)
+                        )
+                    } else {
+                        Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(16.dp))
+                    }
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = if (isExtracting) "正在從當前對話萃取記憶..." else "✨ 讓 AI 從當前對話自動萃取並更新記憶",
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                OutlinedTextField(
+                    value = memoryText,
+                    onValueChange = { memoryText = it },
+                    label = { Text("📝 長期記憶內容 (可隨時手動增刪)") },
+                    placeholder = {
+                        Text(
+                            "範例：\n• 目前正在準備 JLPT N3 日文檢定，對平假名助詞較不熟\n• 預計 11 月底去東京與河口湖旅遊\n• 喜歡動漫與科技新聞，回答請保持精煉直接"
+                        )
+                    },
+                    minLines = 5,
+                    maxLines = 9,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onSave(enabled, memoryText.trim()) },
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = EmeraldAccent,
+                    contentColor = Color(0xFF042F2E)
+                )
+            ) {
+                Text("儲存記憶庫", fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消", color = Color(0xFF94A3B8))
+            }
+        }
+    )
 }
 
 private fun copyToClipboard(context: Context, label: String, text: String) {
