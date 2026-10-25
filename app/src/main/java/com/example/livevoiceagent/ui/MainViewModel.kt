@@ -258,7 +258,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
         }
     }
 
-    fun exportNotebookToAnki(entries: List<TutorNotebookEntry>): String {
+    fun exportNotebookToAnki(entries: List<TutorNotebookEntry> = _uiState.value.tutorNotebook): String {
         return repository.exportNotebookToAnkiTsv(entries)
     }
 

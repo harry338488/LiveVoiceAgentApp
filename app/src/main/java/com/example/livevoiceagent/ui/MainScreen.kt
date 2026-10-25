@@ -414,7 +414,7 @@ private fun LiveConversationTab(
     val isTutorMode = currentMode == AppMode.TUTOR
     val messages = uiState.currentSession.messages
     val savedNotebookSentences = remember(uiState.tutorNotebook) {
-        uiState.tutorNotebook.mapTo(hashSetOf()) { it.targetSentence.trim() }
+        uiState.tutorNotebook.mapTo(hashSetOf()) { it.aiSentence.trim() }
     }
 
     LaunchedEffect(messages.size, messages.lastOrNull()?.text?.length, messages.lastOrNull()?.backendThinkingText?.length) {
@@ -1147,7 +1147,7 @@ private fun TutorNotebookDialog(
                         modifier = Modifier.weight(1f, fill = false)
                     ) {
                         items(entries, key = { it.id }) { item ->
-                            val langShort = AppSettings.tutorLanguageLabel(item.targetLanguage).substringBefore(" (")
+                            val langShort = AppSettings.tutorLanguageLabel(item.languageCode).substringBefore(" (")
                             Surface(
                                 shape = RoundedCornerShape(12.dp),
                                 color = Color(0xFF1A2337),
@@ -1160,7 +1160,7 @@ private fun TutorNotebookDialog(
                                         modifier = Modifier.fillMaxWidth()
                                     ) {
                                         Text(
-                                            text = "$langShort · ${item.scenarioLabel} · ${sdf.format(Date(item.createdAt))}",
+                                            text = "$langShort · ${sdf.format(Date(item.createdAt))}",
                                             style = MaterialTheme.typography.labelSmall,
                                             color = AmberTutorAccent,
                                             fontWeight = FontWeight.Bold,
@@ -1168,7 +1168,7 @@ private fun TutorNotebookDialog(
                                         )
                                         IconButton(
                                             onClick = {
-                                                onCopyItem("${item.targetSentence}\n\n${item.coachNotes}")
+                                                onCopyItem("${item.aiSentence}\n\n${item.coachNotes}")
                                             },
                                             modifier = Modifier.size(26.dp)
                                         ) {
@@ -1193,11 +1193,19 @@ private fun TutorNotebookDialog(
                                     }
                                     Spacer(modifier = Modifier.height(4.dp))
                                     Text(
-                                        text = item.targetSentence,
+                                        text = item.aiSentence,
                                         style = MaterialTheme.typography.bodyMedium,
                                         fontWeight = FontWeight.Bold,
                                         color = Color.White
                                     )
+                                    if (item.userSentence.isNotBlank()) {
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        Text(
+                                            text = "🗣️ 你的原句：${item.userSentence}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = Color(0xFF93C5FD)
+                                        )
+                                    }
                                     if (item.coachNotes.isNotBlank()) {
                                         Spacer(modifier = Modifier.height(4.dp))
                                         Text(
