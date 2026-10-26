@@ -1020,7 +1020,7 @@ class LiveSessionManager(
                         )
                         val locRes = locationMapsToolManager.executeLocationOrMapTool(
                             toolName = fnName,
-                            args = argsJson,
+                            argsJson = argsJson,
                             linkupApiKey = settings.linkupApiKey,
                             linkupDepth = settings.linkupSearchDepth
                         )
@@ -1532,7 +1532,7 @@ class LiveSessionManager(
                         listener.onConnectionStateChanged(ConnectionState.DELEGATING, "正在執行定位/周邊搜尋/Google Maps導航 ($fnName)...")
                         val locRes = locationMapsToolManager.executeLocationOrMapTool(
                             toolName = fnName,
-                            args = argsJson,
+                            argsJson = argsJson,
                             linkupApiKey = settings.linkupApiKey,
                             linkupDepth = settings.linkupSearchDepth
                         )

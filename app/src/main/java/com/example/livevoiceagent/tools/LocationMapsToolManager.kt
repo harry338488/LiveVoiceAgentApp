@@ -132,7 +132,7 @@ class LocationMapsToolManager(
         return "📍 【使用者目前手機即時 GPS 位置】：${snap.addressLine} (經緯度: $coords)"
     }
 
-    fun executeLocationOrMapTool(
+    suspend fun executeLocationOrMapTool(
         toolName: String,
         argsJson: JSONObject,
         linkupApiKey: String,
@@ -205,7 +205,7 @@ class LocationMapsToolManager(
         )
     }
 
-    private fun executeSearchNearbyWithLinkup(
+    private suspend fun executeSearchNearbyWithLinkup(
         argsJson: JSONObject,
         linkupApiKey: String,
         linkupDepth: String
