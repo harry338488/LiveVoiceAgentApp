@@ -59,6 +59,13 @@ class LocationMapsToolManager(
     @Volatile
     var onRequestEndLiveSession: ((reason: String) -> Unit)? = null
 
+    @Volatile
+    private var cachedGeocodeKey: String = ""
+    @Volatile
+    private var cachedAddressPair: Pair<String, String>? = null
+    @Volatile
+    private var cachedGeocodeWallMs: Long = 0L
+
     fun hasLocationPermission(): Boolean {
         val fine = ContextCompat.checkSelfPermission(
             context,
@@ -72,7 +79,7 @@ class LocationMapsToolManager(
     }
 
     @SuppressLint("MissingPermission")
-    fun getCurrentLocationSnapshot(): DeviceLocationSnapshot? {
+    fun getCurrentLocationSnapshot(allowBlockingGeocode: Boolean = true): DeviceLocationSnapshot? {
         if (!hasLocationPermission()) return null
         return runCatching {
             val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
@@ -97,7 +104,11 @@ class LocationMapsToolManager(
                 }
             }
             val finalLoc = bestLocation ?: return null
-            val (addressLine, cityOrDistrict) = reverseGeocode(finalLoc.latitude, finalLoc.longitude)
+            val (addressLine, cityOrDistrict) = reverseGeocodeCached(
+                lat = finalLoc.latitude,
+                lon = finalLoc.longitude,
+                allowBlocking = allowBlockingGeocode
+            )
             DeviceLocationSnapshot(
                 latitude = finalLoc.latitude,
                 longitude = finalLoc.longitude,
@@ -110,10 +121,19 @@ class LocationMapsToolManager(
     }
 
     @Suppress("DEPRECATION")
-    private fun reverseGeocode(lat: Double, lon: Double): Pair<String, String> {
+    private fun reverseGeocodeCached(lat: Double, lon: Double, allowBlocking: Boolean): Pair<String, String> {
+        val key = String.format(Locale.US, "%.3f,%.3f", lat, lon)
+        val now = System.currentTimeMillis()
+        val existing = cachedAddressPair
+        if (existing != null && cachedGeocodeKey == key && (now - cachedGeocodeWallMs) < 300_000L) {
+            return existing
+        }
+        val coords = String.format(Locale.US, "%.5f, %.5f", lat, lon)
+        if (!allowBlocking) {
+            return existing ?: (coords to coords)
+        }
         return runCatching {
             if (!Geocoder.isPresent()) {
-                val coords = String.format(Locale.US, "%.5f, %.5f", lat, lon)
                 return@runCatching coords to coords
             }
             val geocoder = Geocoder(context, Locale.TAIWAN)
@@ -133,15 +153,16 @@ class LocationMapsToolManager(
                     first.locality ?: first.subAdminArea,
                     first.subLocality
                 ).distinct().joinToString(" ")
-                val coords = String.format(Locale.US, "%.5f, %.5f", lat, lon)
-                (fullLine.ifBlank { coords }) to (cityDistrict.ifBlank { fullLine.ifBlank { coords } })
+                val resolved = (fullLine.ifBlank { coords }) to (cityDistrict.ifBlank { fullLine.ifBlank { coords } })
+                cachedGeocodeKey = key
+                cachedAddressPair = resolved
+                cachedGeocodeWallMs = System.currentTimeMillis()
+                resolved
             } else {
-                val coords = String.format(Locale.US, "%.5f, %.5f", lat, lon)
                 coords to coords
             }
         }.getOrElse {
-            val coords = String.format(Locale.US, "%.5f, %.5f", lat, lon)
-            coords to coords
+            existing ?: (coords to coords)
         }
     }
 
@@ -156,11 +177,11 @@ class LocationMapsToolManager(
         }.getOrNull()
     }
 
-    fun buildCurrentLocationContextString(): String {
+    fun buildCurrentLocationContextString(allowBlockingGeocode: Boolean = false): String {
         if (!hasLocationPermission()) {
             return "【使用者目前位置狀態】：尚未授予手機 GPS 定位權限（若使用者詢問附近店家或路線，可提醒授權定位或詢問所在地區）。"
         }
-        val snap = getCurrentLocationSnapshot()
+        val snap = getCurrentLocationSnapshot(allowBlockingGeocode = allowBlockingGeocode)
             ?: return "【使用者目前位置狀態】：GPS 定位權限已開啟，但暫無快取座標（若室內訊號較弱，可請使用者口頭告知所在區域或直接呼叫定位工具）。"
         val coords = String.format(Locale.US, "%.5f, %.5f", snap.latitude, snap.longitude)
         return "【使用者手機即時 GPS 位置】：${snap.addressLine}（座標：$coords，精準度 ±${snap.accuracyMeters.toInt()}m）。"

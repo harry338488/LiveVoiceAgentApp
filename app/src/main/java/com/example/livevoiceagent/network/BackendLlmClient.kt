@@ -84,23 +84,27 @@ class BackendLlmClient(
                         onCalendarActionLogged = onCalendarActionLogged
                     )
                 }.getOrElse {
-                    runViaChatCompletionsApi(
-                        baseUrl = baseUrl,
-                        apiKey = apiKey,
-                        model = model,
-                        systemInstructions = systemInstructions,
-                        conversationHistory = conversationHistory,
-                        taskHint = taskHint,
-                        imageBase64 = imageBase64,
-                        settings = settings,
-                        canUseLinkup = canUseLinkup,
-                        canUseCalendar = canUseCalendar,
-                        canUseLocation = canUseLocation,
-                        collectedSearches = collectedSearches,
-                        onThinkingStatusUpdate = onThinkingStatusUpdate,
-                        onSearchExecuted = onSearchExecuted,
-                        onCalendarActionLogged = onCalendarActionLogged
-                    )
+                    if (collectedSearches.isNotEmpty()) {
+                        collectedSearches.joinToString("\n\n") { it.answer.ifBlank { it.rawFormattedForLlm } }
+                    } else {
+                        runViaChatCompletionsApi(
+                            baseUrl = baseUrl,
+                            apiKey = apiKey,
+                            model = model,
+                            systemInstructions = systemInstructions,
+                            conversationHistory = conversationHistory,
+                            taskHint = taskHint,
+                            imageBase64 = imageBase64,
+                            settings = settings,
+                            canUseLinkup = canUseLinkup,
+                            canUseCalendar = canUseCalendar,
+                            canUseLocation = canUseLocation,
+                            collectedSearches = collectedSearches,
+                            onThinkingStatusUpdate = onThinkingStatusUpdate,
+                            onSearchExecuted = onSearchExecuted,
+                            onCalendarActionLogged = onCalendarActionLogged
+                        )
+                    }
                 }
             } else {
                 runViaChatCompletionsApi(
@@ -221,6 +225,8 @@ class BackendLlmClient(
         }
 
         var finalText = ""
+        val executedToolSummaries = mutableListOf<String>()
+
         for (round in 0 until 4) {
             val payload = JSONObject().apply {
                 put("model", model)
@@ -239,12 +245,20 @@ class BackendLlmClient(
                 .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
                 .build()
 
-            val respJson = httpClient.newCall(req).execute().use { resp ->
-                val body = resp.body?.string() ?: ""
-                if (!resp.isSuccessful) {
-                    throw IllegalStateException("Responses API HTTP ${resp.code}: ${body.take(200)}")
+            val respJson = runCatching {
+                httpClient.newCall(req).execute().use { resp ->
+                    val body = resp.body?.string() ?: ""
+                    if (!resp.isSuccessful) {
+                        throw IllegalStateException("Responses API HTTP ${resp.code}: ${body.take(200)}")
+                    }
+                    JSONObject(body)
                 }
-                JSONObject(body)
+            }.getOrElse { err ->
+                // If tools already succeeded in an earlier round, never discard their results or fail the delegation!
+                if (executedToolSummaries.isNotEmpty()) {
+                    return executedToolSummaries.joinToString("\n\n")
+                }
+                throw err
             }
 
             val outputArr = respJson.optJSONArray("output") ?: JSONArray()
@@ -254,6 +268,10 @@ class BackendLlmClient(
             for (i in 0 until outputArr.length()) {
                 val item = outputArr.optJSONObject(i) ?: continue
                 when (item.optString("type")) {
+                    "reasoning" -> {
+                        // Preserve reasoning items in inputArr so function_call items never fail validation
+                        inputArr.put(item)
+                    }
                     "function_call" -> {
                         functionCalls.add(item)
                         inputArr.put(item)
@@ -304,6 +322,7 @@ class BackendLlmClient(
                         }
                         collectedSearches.add(searchRes)
                         onSearchExecuted(searchRes)
+                        executedToolSummaries.add(searchRes.answer.ifBlank { searchRes.rawFormattedForLlm })
                         onThinkingStatusUpdate("已完成 Linkup 搜尋「$query」，後端模型 $model 正在整理重點...")
                         searchRes.rawFormattedForLlm
                     }
@@ -312,6 +331,7 @@ class BackendLlmClient(
                         onThinkingStatusUpdate("正在執行手機行事曆操作 ($fnName)...")
                         val calRes = calendarToolManager.executeCalendarTool(fnName, argsJson)
                         onCalendarActionLogged("📅 行事曆操作 (`$fnName`):\n$calRes")
+                        executedToolSummaries.add(calRes)
                         calRes
                     }
 
@@ -328,6 +348,7 @@ class BackendLlmClient(
                         if (locRes.linkupResult != null) {
                             collectedSearches.add(locRes.linkupResult)
                             onSearchExecuted(locRes.linkupResult)
+                            executedToolSummaries.add(locRes.linkupResult.answer.ifBlank { locRes.actionLogText })
                         } else if (locRes.mapActionSource != null) {
                             val mapCard = LinkupSearchResult(
                                 query = locRes.mapActionSource.title,
@@ -337,6 +358,9 @@ class BackendLlmClient(
                             )
                             collectedSearches.add(mapCard)
                             onSearchExecuted(mapCard)
+                            executedToolSummaries.add(locRes.actionLogText)
+                        } else {
+                            executedToolSummaries.add(locRes.actionLogText)
                         }
                         locRes.toolOutputJson
                     }
@@ -344,12 +368,16 @@ class BackendLlmClient(
                     else -> "{\"status\":\"error\",\"message\":\"Unsupported tool: $fnName\"}"
                 }
 
-                inputArr.put(JSONObject().apply {
+                val outObj = JSONObject().apply {
                     put("type", "function_call_output")
                     put("call_id", callId)
                     put("output", toolOutput)
-                })
+                }
+                inputArr.put(outObj)
             }
+        }
+        if (finalText.isBlank() && executedToolSummaries.isNotEmpty()) {
+            finalText = executedToolSummaries.joinToString("\n\n")
         }
         return finalText
     }
@@ -816,8 +844,16 @@ class BackendLlmClient(
         messages: JSONArray,
         tools: JSONArray?
     ): JSONObject {
+        val lowerModel = model.lowercase()
+        val effectiveModel = if (baseUrl.contains("api.openai.com") &&
+            (lowerModel.startsWith("gpt-6") || lowerModel.startsWith("gpt-live"))
+        ) {
+            "gpt-4o"
+        } else {
+            model
+        }
         val payload = JSONObject().apply {
-            put("model", model)
+            put("model", effectiveModel)
             put("messages", messages)
             if (tools != null && tools.length() > 0) {
                 put("tools", tools)
@@ -835,7 +871,7 @@ class BackendLlmClient(
         httpClient.newCall(request).execute().use { response ->
             val bodyStr = response.body?.string() ?: ""
             if (!response.isSuccessful) {
-                throw IllegalStateException("Backend LLM ($model) HTTP ${response.code}: ${bodyStr.take(220)}")
+                throw IllegalStateException("Backend LLM ($effectiveModel) HTTP ${response.code}: ${bodyStr.take(220)}")
             }
             return JSONObject(bodyStr)
         }

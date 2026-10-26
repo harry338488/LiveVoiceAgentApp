@@ -9,6 +9,7 @@ import com.example.livevoiceagent.model.*
 import com.example.livevoiceagent.network.*
 import com.example.livevoiceagent.tools.CalendarToolManager
 import com.example.livevoiceagent.tools.LocationMapsToolManager
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -98,6 +99,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
 
     private val isGeneratingTitle = AtomicBoolean(false)
     private var pendingAutoHangupJob: Job? = null
+    private var persistSessionJob: Job? = null
 
     init {
         val loadedSettings = repository.loadSettings()
@@ -318,7 +320,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
         liveSessionManager.disconnectGracefully()
         triggerAiTitleGenerationIfNeeded()
         triggerBackgroundMemoryExtractionIfNeeded()
-        persistCurrentSession()
+        persistCurrentSession(immediate = true)
     }
 
     fun toggleMute() {
@@ -777,7 +779,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
             liveSessionManager.disconnectImmediate()
         }
         triggerBackgroundMemoryExtractionIfNeeded()
-        persistCurrentSession()
+        persistCurrentSession(immediate = true)
         val s = _uiState.value.settings
         val timeLabel = SimpleDateFormat("MM/dd HH:mm", Locale.getDefault()).format(Date())
         _uiState.update {
@@ -796,7 +798,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
         if (_uiState.value.connectionState != ConnectionState.DISCONNECTED) {
             liveSessionManager.disconnectImmediate()
         }
-        persistCurrentSession()
+        persistCurrentSession(immediate = true)
         _uiState.update {
             it.copy(
                 currentSession = session,
@@ -806,7 +808,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
     }
 
     fun deleteSavedSession(sessionId: String) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             repository.deleteSession(sessionId)
             val updated = repository.loadAllSessions()
             _uiState.update { it.copy(savedSessions = updated) }
@@ -839,7 +841,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
         val settingsSnapshot = _uiState.value.settings
         val messagesSnapshot = current.messages
 
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             try {
                 val aiTitle = backendLlmClient.generateConversationTitle(settingsSnapshot, messagesSnapshot)
                 if (!aiTitle.isNullOrBlank()) {
@@ -855,7 +857,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
                             state
                         }
                     }
-                    persistCurrentSession()
+                    persistCurrentSession(immediate = true)
                 }
             } finally {
                 isGeneratingTitle.set(false)
@@ -863,13 +865,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
         }
     }
 
-    private fun persistCurrentSession() {
-        val current = _uiState.value.currentSession
-        if (current.messages.isEmpty()) return
-        viewModelScope.launch {
-            repository.saveSession(current)
-            val all = repository.loadAllSessions()
-            _uiState.update { it.copy(savedSessions = all) }
+    private fun persistCurrentSession(immediate: Boolean = false) {
+        val snapshot = _uiState.value.currentSession
+        if (snapshot.messages.isEmpty()) return
+        if (immediate) {
+            persistSessionJob?.cancel()
+            viewModelScope.launch(Dispatchers.IO) {
+                repository.saveSession(snapshot)
+                val all = repository.loadAllSessions()
+                _uiState.update { it.copy(savedSessions = all) }
+            }
+            return
+        }
+        persistSessionJob?.cancel()
+        persistSessionJob = viewModelScope.launch(Dispatchers.IO) {
+            delay(750L)
+            val latest = _uiState.value.currentSession
+            if (latest.messages.isNotEmpty()) {
+                repository.saveSession(latest)
+                val all = repository.loadAllSessions()
+                _uiState.update { it.copy(savedSessions = all) }
+            }
         }
     }
 

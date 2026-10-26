@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
+import android.media.AudioRecordingConfiguration
 import android.media.MediaRecorder
 import android.media.ToneGenerator
 import android.os.Build
@@ -89,6 +90,7 @@ class WakeWordManager(
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(6, TimeUnit.SECONDS)
@@ -97,6 +99,7 @@ class WakeWordManager(
         .build()
 
     private var standbyJob: Job? = null
+    private var externalAudioMonitorJob: Job? = null
 
     @Volatile
     private var isStandbyEnabled: Boolean = false
@@ -104,6 +107,12 @@ class WakeWordManager(
     private var isPausedForActiveCall: Boolean = false
     @Volatile
     private var isEnrollingVoiceprint: Boolean = false
+    @Volatile
+    private var isYieldingForExternalAudio: Boolean = false
+    @Volatile
+    private var activeWakeAudioSessionId: Int = -1
+    @Volatile
+    private var isRecordingCallbackRegistered: Boolean = false
 
     @Volatile
     private var openAiApiKey: String = ""
@@ -115,6 +124,104 @@ class WakeWordManager(
     private var enrolledProfile: VoiceprintProfile? = null
 
     private var lastTriggerWallMs: Long = 0L
+
+    /**
+     * System callback that fires immediately whenever another app (LINE voice message/call,
+     * Camera video recording, Gboard voice typing, Voice Recorder, etc.) starts or stops recording.
+     */
+    private val audioRecordingCallback = object : AudioManager.AudioRecordingCallback() {
+        override fun onRecordingConfigChanged(configs: List<AudioRecordingConfiguration>) {
+            if (!isStandbyEnabled || isPausedForActiveCall || isEnrollingVoiceprint) return
+            val mySessionId = activeWakeAudioSessionId
+            val otherAppRecording = configs.any { cfg ->
+                mySessionId <= 0 || cfg.clientAudioSessionId != mySessionId
+            }
+            val silencedBySystem = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && mySessionId > 0) {
+                configs.any { cfg -> cfg.clientAudioSessionId == mySessionId && cfg.isClientSilenced }
+            } else {
+                false
+            }
+            if ((otherAppRecording || silencedBySystem || isExternalCallOrCommunicationModeActive()) &&
+                standbyJob?.isActive == true
+            ) {
+                yieldMicrophoneForExternalApp("📞 偵測到電話、LINE 通話或其他程式錄音，已自動禮讓麥克風")
+            }
+        }
+    }
+
+    private fun registerExternalAudioListenersIfNeeded() {
+        if (!isRecordingCallbackRegistered) {
+            runCatching {
+                audioManager.registerAudioRecordingCallback(audioRecordingCallback, mainHandler)
+                isRecordingCallbackRegistered = true
+            }
+        }
+        if (externalAudioMonitorJob?.isActive != true) {
+            externalAudioMonitorJob = scope.launch {
+                var clearChecks = 0
+                while (isActive && isStandbyEnabled) {
+                    delay(900L)
+                    if (!isStandbyEnabled || isPausedForActiveCall || isEnrollingVoiceprint) {
+                        clearChecks = 0
+                        continue
+                    }
+                    val callOrVoipBusy = isExternalCallOrCommunicationModeActive()
+                    val otherRecBusy = hasOtherAppActiveRecording()
+
+                    if (callOrVoipBusy || otherRecBusy) {
+                        clearChecks = 0
+                        if (standbyJob?.isActive == true) {
+                            yieldMicrophoneForExternalApp("📞 偵測到電話或通訊軟體(LINE等)通話中，已自動釋放麥克風禮讓")
+                        }
+                    } else if (isYieldingForExternalAudio || standbyJob?.isActive != true) {
+                        clearChecks++
+                        if (clearChecks >= 2) {
+                            clearChecks = 0
+                            isYieldingForExternalAudio = false
+                            startContinuousStandbyJobIfNeeded()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun unregisterExternalAudioListeners() {
+        externalAudioMonitorJob?.cancel()
+        externalAudioMonitorJob = null
+        if (isRecordingCallbackRegistered) {
+            runCatching {
+                audioManager.unregisterAudioRecordingCallback(audioRecordingCallback)
+            }
+            isRecordingCallbackRegistered = false
+        }
+    }
+
+    private fun isExternalCallOrCommunicationModeActive(): Boolean {
+        return runCatching {
+            val mode = audioManager.mode
+            mode == AudioManager.MODE_RINGTONE ||
+                    mode == AudioManager.MODE_IN_CALL ||
+                    mode == AudioManager.MODE_IN_COMMUNICATION ||
+                    (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && mode == AudioManager.MODE_CALL_SCREENING)
+        }.getOrDefault(false)
+    }
+
+    private fun hasOtherAppActiveRecording(): Boolean {
+        return runCatching {
+            val mySessionId = activeWakeAudioSessionId
+            val configs = audioManager.activeRecordingConfigurations
+            configs.any { cfg ->
+                mySessionId <= 0 || cfg.clientAudioSessionId != mySessionId
+            }
+        }.getOrDefault(false)
+    }
+
+    private fun yieldMicrophoneForExternalApp(statusReason: String) {
+        isYieldingForExternalAudio = true
+        stopContinuousStandbyJob()
+        notifyStatusOnMain(false, statusReason)
+    }
 
     fun startStandby(settings: AppSettings) {
         openAiApiKey = settings.openAiApiKey.trim()
@@ -131,6 +238,7 @@ class WakeWordManager(
         isPausedForActiveCall = true
         stopContinuousStandbyJob()
         if (!isStandbyEnabled) {
+            unregisterExternalAudioListeners()
             stopForegroundKeepAliveService()
         }
         notifyStatusOnMain(false, "語音喚醒待機已暫停")
@@ -151,6 +259,7 @@ class WakeWordManager(
         if (enabled) {
             isStandbyEnabled = true
             startForegroundKeepAliveService()
+            registerExternalAudioListenersIfNeeded()
             if (isPausedForActiveCall || isEnrollingVoiceprint) {
                 stopContinuousStandbyJob()
             } else {
@@ -158,6 +267,8 @@ class WakeWordManager(
             }
         } else {
             isStandbyEnabled = false
+            isYieldingForExternalAudio = false
+            unregisterExternalAudioListeners()
             stopContinuousStandbyJob()
             stopForegroundKeepAliveService()
             notifyStatusOnMain(false, "語音喚醒待機已關閉")
@@ -232,6 +343,12 @@ class WakeWordManager(
             delay(250L)
             if (!isActive || !isStandbyEnabled || isPausedForActiveCall || isEnrollingVoiceprint) return@launch
 
+            if (isExternalCallOrCommunicationModeActive() || hasOtherAppActiveRecording()) {
+                isYieldingForExternalAudio = true
+                notifyStatusOnMain(false, "📞 偵測到電話或通訊軟體(LINE等)使用麥克風中，已自動禮讓")
+                return@launch
+            }
+
             val sampleRate = 16000
             val frameSize = 512 // 32ms per frame at 16kHz
             val minBuf = AudioRecord.getMinBufferSize(
@@ -242,13 +359,16 @@ class WakeWordManager(
 
             val recorder = createWakeAudioRecord(sampleRate, minBuf * 2)
             if (recorder == null || recorder.state != AudioRecord.STATE_INITIALIZED) {
-                notifyStatusOnMain(false, "⚠️ 麥克風初始化失敗，請確認無其他通話程式占用")
+                isYieldingForExternalAudio = true
+                notifyStatusOnMain(false, "📞 麥克風正由其他程式使用中，將自動等待並恢復待機")
                 return@launch
             }
 
+            activeWakeAudioSessionId = recorder.audioSessionId
             try {
                 recorder.startRecording()
-                notifyStatusOnMain(true, "🎧 穩定待機中：請說「$targetWakePhrase」（靜音時 0 費用）")
+                isYieldingForExternalAudio = false
+                notifyStatusOnMain(true, "🎧 穩定待機中：請說「$targetWakePhrase」（電話/LINE 通話會自動禮讓）")
 
                 // Pre-roll circular buffer (~576ms = 18 frames) so the first word "hey" is never clipped
                 val preRollCapacity = 18
@@ -263,10 +383,22 @@ class WakeWordManager(
                 var consecutiveSilentFrames = 0
                 var voicedFramesInUtterance = 0
                 var ambientNoiseRms = 0.006f
+                var modeCheckCounter = 0
 
                 val frameBuf = ShortArray(frameSize)
 
                 while (isActive && isStandbyEnabled && !isPausedForActiveCall && !isEnrollingVoiceprint) {
+                    // Check every ~320ms (10 frames) if a phone call or LINE/VoIP call started
+                    modeCheckCounter++
+                    if (modeCheckCounter >= 10) {
+                        modeCheckCounter = 0
+                        if (isExternalCallOrCommunicationModeActive()) {
+                            isYieldingForExternalAudio = true
+                            notifyStatusOnMain(false, "📞 偵測到電話或 LINE 語音通話，已自動釋放麥克風禮讓")
+                            break
+                        }
+                    }
+
                     val read = recorder.read(frameBuf, 0, frameSize)
                     if (read <= 0) {
                         delay(15L)
@@ -360,6 +492,7 @@ class WakeWordManager(
             } catch (e: Exception) {
                 notifyStatusOnMain(false, "⚠️ 語音待機重連中：${e.message?.take(30)}")
             } finally {
+                activeWakeAudioSessionId = -1
                 runCatching { recorder.stop() }
                 runCatching { recorder.release() }
             }
@@ -585,6 +718,7 @@ class WakeWordManager(
                     }
                 }
             } finally {
+                activeWakeAudioSessionId = -1
                 runCatching { recorder.stop() }
                 runCatching { recorder.release() }
             }
