@@ -11,21 +11,26 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.media.ToneGenerator
 import android.os.Build
-import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
-import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
 import androidx.core.content.ContextCompat
 import com.example.livevoiceagent.model.AppSettings
 import kotlinx.coroutines.*
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MultipartBody
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.Locale
+import java.util.concurrent.TimeUnit
 import kotlin.math.*
 
 data class VoiceprintProfile(
@@ -68,15 +73,31 @@ data class VoiceprintProfile(
     }
 }
 
+/**
+ * Continuous Single-AudioRecord Wake Word & Acoustic Voiceprint Manager:
+ * - Holds ONE steady AudioRecord stream while in standby (eliminating the Android SpeechRecognizer
+ *   start/stop loop that caused the system microphone indicator to repeatedly flash "occupied -> cancelled").
+ * - Uses a 0.55s pre-roll ring buffer + local RMS VAD energy gate ($0 API cost during silence).
+ * - Verifies acoustic voiceprint directly on the captured wake utterance PCM buffer.
+ * - Transcribes short candidate wake utterances via OpenAI `gpt-4o-mini-transcribe` (with bilingual prompt
+ *   bias for `"hey Luna 我需要你"`) and cleanly releases the microphone BEFORE starting the Live Call.
+ */
 class WakeWordManager(
     private val context: Context,
     private val onWakeWordDetected: (matchedTranscript: String, similarityScore: Int) -> Unit,
     private val onStandbyStatusChanged: (isListening: Boolean, statusText: String) -> Unit
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-    private var speechRecognizer: SpeechRecognizer? = null
+    private val httpClient = OkHttpClient.Builder()
+        .connectTimeout(6, TimeUnit.SECONDS)
+        .readTimeout(8, TimeUnit.SECONDS)
+        .writeTimeout(6, TimeUnit.SECONDS)
+        .build()
+
+    private var standbyJob: Job? = null
+
     @Volatile
     private var isStandbyEnabled: Boolean = false
     @Volatile
@@ -85,17 +106,18 @@ class WakeWordManager(
     private var isEnrollingVoiceprint: Boolean = false
 
     @Volatile
+    private var openAiApiKey: String = ""
+    @Volatile
     private var targetWakePhrase: String = "hey Luna 我需要你"
     @Volatile
     private var voiceprintEnabled: Boolean = true
     @Volatile
     private var enrolledProfile: VoiceprintProfile? = null
 
-    private var maxRmsInCurrentUtterance: Float = -10f
-    private var rmsSamplesInUtterance = mutableListOf<Float>()
     private var lastTriggerWallMs: Long = 0L
 
     fun startStandby(settings: AppSettings) {
+        openAiApiKey = settings.openAiApiKey.trim()
         configure(
             enabled = settings.wakeWordEnabled,
             wakePhrase = settings.wakeWordPhrase,
@@ -107,11 +129,11 @@ class WakeWordManager(
 
     fun stopStandby() {
         isPausedForActiveCall = true
-        stopListeningOnMainThread()
+        stopContinuousStandbyJob()
         if (!isStandbyEnabled) {
             stopForegroundKeepAliveService()
         }
-        onStandbyStatusChanged(false, "語音喚醒待機已暫停")
+        notifyStatusOnMain(false, "語音喚醒待機已暫停")
     }
 
     fun configure(
@@ -126,36 +148,38 @@ class WakeWordManager(
         enrolledProfile = VoiceprintProfile.fromJsonString(voiceprintDataJson)
         isPausedForActiveCall = isCallCurrentlyActive
 
-        if (enabled && !isStandbyEnabled) {
+        if (enabled) {
             isStandbyEnabled = true
             startForegroundKeepAliveService()
-            if (!isPausedForActiveCall && !isEnrollingVoiceprint) {
-                startListeningOnMainThread()
+            if (isPausedForActiveCall || isEnrollingVoiceprint) {
+                stopContinuousStandbyJob()
+            } else {
+                startContinuousStandbyJobIfNeeded()
             }
-        } else if (!enabled && isStandbyEnabled) {
+        } else {
             isStandbyEnabled = false
+            stopContinuousStandbyJob()
             stopForegroundKeepAliveService()
-            stopListeningOnMainThread()
-            onStandbyStatusChanged(false, "語音喚醒待機已關閉")
-        } else if (enabled) {
-            if (isPausedForActiveCall) {
-                stopListeningOnMainThread()
-            } else if (!isEnrollingVoiceprint) {
-                startListeningOnMainThread()
-            }
+            notifyStatusOnMain(false, "語音喚醒待機已關閉")
         }
     }
 
     fun setCallActiveState(isActive: Boolean) {
         isPausedForActiveCall = isActive
         if (isActive) {
-            stopListeningOnMainThread()
+            stopContinuousStandbyJob()
         } else if (isStandbyEnabled && !isEnrollingVoiceprint) {
             mainHandler.postDelayed({
                 if (isStandbyEnabled && !isPausedForActiveCall && !isEnrollingVoiceprint) {
-                    startListeningOnMainThread()
+                    startContinuousStandbyJobIfNeeded()
                 }
-            }, 1400L)
+            }, 900L)
+        }
+    }
+
+    private fun notifyStatusOnMain(isListening: Boolean, statusText: String) {
+        mainHandler.post {
+            onStandbyStatusChanged(isListening, statusText)
         }
     }
 
@@ -185,155 +209,344 @@ class WakeWordManager(
         ) == PackageManager.PERMISSION_GRANTED
     }
 
-    private fun startListeningOnMainThread() {
-        mainHandler.post {
-            if (!isStandbyEnabled || isPausedForActiveCall || isEnrollingVoiceprint) return@post
-            if (!hasRecordPermission()) {
-                onStandbyStatusChanged(false, "缺少麥克風權限，無法啟動喚醒詞待機")
-                return@post
+    private fun stopContinuousStandbyJob() {
+        val job = standbyJob
+        standbyJob = null
+        job?.cancel()
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun startContinuousStandbyJobIfNeeded() {
+        if (!isStandbyEnabled || isPausedForActiveCall || isEnrollingVoiceprint) return
+        if (standbyJob?.isActive == true) {
+            notifyStatusOnMain(true, "🎧 穩定待機中：請說「$targetWakePhrase」（靜音時 0 費用）")
+            return
+        }
+        if (!hasRecordPermission()) {
+            notifyStatusOnMain(false, "缺少麥克風權限，無法啟動喚醒詞待機")
+            return
+        }
+
+        standbyJob = scope.launch {
+            // Brief settle delay so any prior call AudioRecord is 100% released
+            delay(250L)
+            if (!isActive || !isStandbyEnabled || isPausedForActiveCall || isEnrollingVoiceprint) return@launch
+
+            val sampleRate = 16000
+            val frameSize = 512 // 32ms per frame at 16kHz
+            val minBuf = AudioRecord.getMinBufferSize(
+                sampleRate,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT
+            ).coerceAtLeast(frameSize * 8)
+
+            val recorder = createWakeAudioRecord(sampleRate, minBuf * 2)
+            if (recorder == null || recorder.state != AudioRecord.STATE_INITIALIZED) {
+                notifyStatusOnMain(false, "⚠️ 麥克風初始化失敗，請確認無其他通話程式占用")
+                return@launch
             }
-            if (!SpeechRecognizer.isRecognitionAvailable(context)) {
-                onStandbyStatusChanged(false, "此裝置不支援系統離線/本地語音喚醒辨識")
-                return@post
-            }
 
-            runCatching {
-                destroyRecognizerInternal()
-                val recognizer = SpeechRecognizer.createSpeechRecognizer(context)
-                speechRecognizer = recognizer
+            try {
+                recorder.startRecording()
+                notifyStatusOnMain(true, "🎧 穩定待機中：請說「$targetWakePhrase」（靜音時 0 費用）")
 
-                recognizer.setRecognitionListener(object : RecognitionListener {
-                    override fun onReadyForSpeech(params: Bundle?) {
-                        maxRmsInCurrentUtterance = -10f
-                        rmsSamplesInUtterance.clear()
-                        onStandbyStatusChanged(true, "🎧 待機聆聽喚醒詞：「$targetWakePhrase」（0 API 費用）")
+                // Pre-roll circular buffer (~576ms = 18 frames) so the first word "hey" is never clipped
+                val preRollCapacity = 18
+                val preRollFrames = ArrayDeque<ShortArray>(preRollCapacity)
+
+                // Max wake utterance capture: 4.2 seconds (132 frames of 32ms)
+                val maxSpeechFrames = 132
+                val speechFrames = ArrayList<ShortArray>(maxSpeechFrames + preRollCapacity)
+
+                var isCollectingSpeech = false
+                var consecutiveActiveFrames = 0
+                var consecutiveSilentFrames = 0
+                var voicedFramesInUtterance = 0
+                var ambientNoiseRms = 0.006f
+
+                val frameBuf = ShortArray(frameSize)
+
+                while (isActive && isStandbyEnabled && !isPausedForActiveCall && !isEnrollingVoiceprint) {
+                    val read = recorder.read(frameBuf, 0, frameSize)
+                    if (read <= 0) {
+                        delay(15L)
+                        continue
                     }
 
-                    override fun onBeginningOfSpeech() {
-                        maxRmsInCurrentUtterance = 0f
-                        rmsSamplesInUtterance.clear()
+                    // Calculate frame RMS energy (0.0 .. 1.0)
+                    var sumSq = 0.0
+                    for (i in 0 until read) {
+                        val norm = frameBuf[i].toDouble() / 32768.0
+                        sumSq += norm * norm
                     }
+                    val frameRms = sqrt(sumSq / read).toFloat()
+                    val frameCopy = frameBuf.copyOf(read)
 
-                    override fun onRmsChanged(rmsdB: Float) {
-                        if (rmsdB > maxRmsInCurrentUtterance) {
-                            maxRmsInCurrentUtterance = rmsdB
+                    // Adaptive speech threshold: sensitive enough for normal speaking distance, ignores quiet room hum
+                    val onsetThreshold = (ambientNoiseRms * 2.5f).coerceIn(0.013f, 0.042f)
+                    val sustainThreshold = (ambientNoiseRms * 1.8f).coerceIn(0.010f, 0.032f)
+
+                    if (!isCollectingSpeech) {
+                        if (frameRms < onsetThreshold) {
+                            ambientNoiseRms = (ambientNoiseRms * 0.96f + frameRms * 0.04f).coerceIn(0.003f, 0.025f)
+                            consecutiveActiveFrames = 0
+                        } else {
+                            consecutiveActiveFrames++
                         }
-                        if (rmsdB > 1.5f && rmsSamplesInUtterance.size < 200) {
-                            rmsSamplesInUtterance.add(rmsdB)
+
+                        if (preRollFrames.size >= preRollCapacity) {
+                            preRollFrames.removeFirst()
+                        }
+                        preRollFrames.addLast(frameCopy)
+
+                        // Trigger utterance capture after 2 consecutive voiced frames (~64ms)
+                        if (consecutiveActiveFrames >= 2) {
+                            isCollectingSpeech = true
+                            consecutiveSilentFrames = 0
+                            voicedFramesInUtterance = consecutiveActiveFrames
+                            speechFrames.clear()
+                            for (pf in preRollFrames) {
+                                speechFrames.add(pf)
+                            }
+                            preRollFrames.clear()
+                        }
+                    } else {
+                        speechFrames.add(frameCopy)
+                        if (frameRms >= sustainThreshold) {
+                            voicedFramesInUtterance++
+                            consecutiveSilentFrames = 0
+                        } else {
+                            consecutiveSilentFrames++
+                        }
+
+                        // End of utterance when speaker pauses for ~600ms (19 frames) or hits 4.2s cap
+                        val endedByPause = consecutiveSilentFrames >= 19
+                        val endedByMaxLen = speechFrames.size >= (maxSpeechFrames + preRollCapacity)
+
+                        if (endedByPause || endedByMaxLen) {
+                            isCollectingSpeech = false
+                            consecutiveActiveFrames = 0
+                            val capturedVoicedCount = voicedFramesInUtterance
+                            voicedFramesInUtterance = 0
+
+                            // Require at least ~0.45s of voiced speech (10+ voiced frames) to ignore brief clicks/coughs
+                            if (capturedVoicedCount >= 10 && speechFrames.size >= 22) {
+                                val totalSamples = speechFrames.sumOf { it.size }
+                                val fullPcm = ShortArray(totalSamples)
+                                var offset = 0
+                                for (chunk in speechFrames) {
+                                    System.arraycopy(chunk, 0, fullPcm, offset, chunk.size)
+                                    offset += chunk.size
+                                }
+                                speechFrames.clear()
+
+                                val triggered = evaluateAndVerifyWakeUtterance(
+                                    pcmSamples = fullPcm,
+                                    sampleRate = sampleRate,
+                                    activeRecorderToReleaseOnTrigger = recorder
+                                )
+                                if (triggered) {
+                                    // Wake word matched! Recorder was already stopped & released for clean call handoff.
+                                    return@launch
+                                }
+                            } else {
+                                speechFrames.clear()
+                            }
                         }
                     }
-
-                    override fun onBufferReceived(buffer: ByteArray?) {}
-
-                    override fun onEndOfSpeech() {}
-
-                    override fun onError(error: Int) {
-                        // Automatically restart continuous wake-word listening loop
-                        scheduleRestartListening(delayMs = if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) 1200L else 450L)
-                    }
-
-                    override fun onResults(results: Bundle?) {
-                        val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION).orEmpty()
-                        if (!checkCandidatesAndTriggerIfMatched(matches)) {
-                            scheduleRestartListening(delayMs = 250L)
-                        }
-                    }
-
-                    override fun onPartialResults(partialResults: Bundle?) {
-                        val partials = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION).orEmpty()
-                        checkCandidatesAndTriggerIfMatched(partials)
-                    }
-
-                    override fun onEvent(eventType: Int, params: Bundle?) {}
-                })
-
-                val recognizerIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                    putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                    putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-TW")
-                    putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                    putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
                 }
-                recognizer.startListening(recognizerIntent)
-            }.onFailure {
-                scheduleRestartListening(delayMs = 1500L)
+            } catch (_: CancellationException) {
+                // Normal standby cancellation
+            } catch (e: Exception) {
+                notifyStatusOnMain(false, "⚠️ 語音待機重連中：${e.message?.take(30)}")
+            } finally {
+                runCatching { recorder.stop() }
+                runCatching { recorder.release() }
             }
         }
     }
 
-    private fun checkCandidatesAndTriggerIfMatched(candidates: List<String>): Boolean {
-        if (!isStandbyEnabled || isPausedForActiveCall || isEnrollingVoiceprint) return false
+    @SuppressLint("MissingPermission")
+    private fun createWakeAudioRecord(sampleRate: Int, bufferSizeInBytes: Int): AudioRecord? {
+        val sources = intArrayOf(
+            MediaRecorder.AudioSource.VOICE_RECOGNITION,
+            MediaRecorder.AudioSource.MIC
+        )
+        for (src in sources) {
+            val rec = runCatching {
+                AudioRecord(
+                    src,
+                    sampleRate,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                    bufferSizeInBytes
+                )
+            }.getOrNull()
+            if (rec != null && rec.state == AudioRecord.STATE_INITIALIZED) {
+                return rec
+            }
+            runCatching { rec?.release() }
+        }
+        return null
+    }
+
+    /**
+     * Evaluates a captured utterance for:
+     * 1) Acoustic Voiceprint match (directly on the spoken PCM buffer!)
+     * 2) Bilingual wake phrase transcription ("hey Luna 我需要你")
+     * Returns true if wake word was triggered and Live Call is starting.
+     */
+    private suspend fun evaluateAndVerifyWakeUtterance(
+        pcmSamples: ShortArray,
+        sampleRate: Int,
+        activeRecorderToReleaseOnTrigger: AudioRecord
+    ): Boolean {
         val now = System.currentTimeMillis()
-        if (now - lastTriggerWallMs < 4500L) return false
+        if (now - lastTriggerWallMs < 3500L) return false
 
-        val matchedText = candidates.firstOrNull { candidate ->
-            matchesWakePhrase(candidate, targetWakePhrase)
-        } ?: return false
+        // Step 1: Extract acoustic voiceprint directly from the spoken utterance
+        val candidateProfile = extractAcousticVoiceprint(
+            samples = pcmSamples,
+            length = pcmSamples.size,
+            sampleRate = sampleRate,
+            minVoicedFrames = 4
+        ) ?: return false
 
-        // Layer 1 Gate: Near-Field Energy Check (ignore faint background TV or distant room talk)
-        if (maxRmsInCurrentUtterance < 3.2f) {
+        var similarityScore = 95
+        val profile = enrolledProfile
+        if (voiceprintEnabled && profile != null) {
+            similarityScore = computeVoiceprintSimilarityScore(profile, candidateProfile)
+            if (similarityScore < 62) {
+                notifyStatusOnMain(
+                    true,
+                    "🛡️ 已略過非本人聲紋語音（吻合度 $similarityScore% < 62%）· 持續待機中"
+                )
+                return false
+            }
+        }
+
+        val apiKey = openAiApiKey.trim()
+        if (apiKey.isBlank()) {
+            notifyStatusOnMain(false, "⚠️ 請先在設定填入 OpenAI API Key 以辨識喚醒詞")
             return false
         }
 
-        lastTriggerWallMs = now
-        stopListeningOnMainThread()
+        notifyStatusOnMain(true, "🎙️ 偵測到語音，正在辨識是否為「$targetWakePhrase」...")
 
-        // Layer 2 Gate: Acoustic Voiceprint Verification (if enrolled & enabled)
-        scope.launch {
-            val profile = enrolledProfile
-            var similarityScore = 95
-            if (voiceprintEnabled && profile != null) {
-                val quickSample = captureQuickVoiceprintVerificationSample(durationMs = 380L)
-                similarityScore = if (quickSample != null) {
-                    computeVoiceprintSimilarityScore(profile, quickSample)
-                } else {
-                    // If the user already finished speaking the phrase during STT, evaluate cadence/RMS energy envelope
-                    evaluateRmsEnvelopeSimilarity(rmsSamplesInUtterance)
-                }
-                if (similarityScore < 72) {
-                    withContext(Dispatchers.Main) {
-                        onStandbyStatusChanged(true, "🛡️ 已攔截非本人聲紋喚醒（相似度 $similarityScore% < 72%）")
-                        scheduleRestartListening(delayMs = 900L)
-                    }
-                    return@launch
-                }
-            }
+        // Step 2: Fast bilingual transcription of the 1-3s WAV clip
+        val transcript = transcribeWakeCandidateWithOpenAi(
+            pcmSamples = pcmSamples,
+            sampleRate = sampleRate,
+            apiKey = apiKey,
+            wakePhraseHint = targetWakePhrase
+        ).trim()
 
-            withContext(Dispatchers.Main) {
-                playWakeChimeAndVibrate()
-                onWakeWordDetected(matchedText, similarityScore)
-            }
+        if (transcript.isBlank()) {
+            notifyStatusOnMain(true, "🎧 穩定待機中：請說「$targetWakePhrase」")
+            return false
+        }
+
+        if (!matchesWakePhrase(transcript, targetWakePhrase)) {
+            val preview = transcript.replace("\n", " ").take(20)
+            notifyStatusOnMain(
+                true,
+                "🎧 待機中（聽到：「$preview」未吻合「$targetWakePhrase」）"
+            )
+            return false
+        }
+
+        // Step 3: Matched! Immediately release the standby AudioRecord BEFORE starting Live Call
+        lastTriggerWallMs = System.currentTimeMillis()
+        isPausedForActiveCall = true
+        runCatching { activeRecorderToReleaseOnTrigger.stop() }
+        runCatching { activeRecorderToReleaseOnTrigger.release() }
+
+        // Give Android AudioFlinger 180ms to mark the mic free before LiveSessionManager opens its AudioRecord
+        delay(180L)
+
+        withContext(Dispatchers.Main) {
+            playWakeChimeAndVibrate()
+            onWakeWordDetected(transcript, similarityScore)
         }
         return true
     }
 
-    private fun scheduleRestartListening(delayMs: Long) {
-        mainHandler.removeCallbacksAndMessages(null)
-        mainHandler.postDelayed({
-            if (isStandbyEnabled && !isPausedForActiveCall && !isEnrollingVoiceprint) {
-                startListeningOnMainThread()
+    private fun transcribeWakeCandidateWithOpenAi(
+        pcmSamples: ShortArray,
+        sampleRate: Int,
+        apiKey: String,
+        wakePhraseHint: String
+    ): String {
+        val wavBytes = encodePcmToWavBytes(pcmSamples, sampleRate)
+        val promptHint = "請精確轉寫使用者的喚醒詞或短句，常見喚醒詞為：$wakePhraseHint, hey Luna 我需要你, 嘿露娜我需要你。"
+
+        val modelsToTry = listOf("gpt-4o-mini-transcribe", "whisper-1")
+        for (modelName in modelsToTry) {
+            val text = runCatching {
+                val body = MultipartBody.Builder()
+                    .setType(MultipartBody.FORM)
+                    .addFormDataPart(
+                        "file",
+                        "wake.wav",
+                        wavBytes.toRequestBody("audio/wav".toMediaType())
+                    )
+                    .addFormDataPart("model", modelName)
+                    .addFormDataPart("prompt", promptHint)
+                    .build()
+
+                val request = Request.Builder()
+                    .url("https://api.openai.com/v1/audio/transcriptions")
+                    .addHeader("Authorization", "Bearer $apiKey")
+                    .post(body)
+                    .build()
+
+                httpClient.newCall(request).execute().use { resp ->
+                    val raw = resp.body?.string().orEmpty()
+                    if (!resp.isSuccessful) return@use ""
+                    JSONObject(raw).optString("text", "").trim()
+                }
+            }.getOrDefault("")
+
+            if (text.isNotBlank()) {
+                return text
             }
-        }, delayMs)
+        }
+        return ""
     }
 
-    private fun stopListeningOnMainThread() {
-        mainHandler.removeCallbacksAndMessages(null)
-        mainHandler.post {
-            destroyRecognizerInternal()
-        }
-    }
+    private fun encodePcmToWavBytes(pcmSamples: ShortArray, sampleRate: Int): ByteArray {
+        val byteDataSize = pcmSamples.size * 2
+        val totalDataLen = byteDataSize + 36
+        val byteRate = sampleRate * 2
+        val out = ByteArrayOutputStream(byteDataSize + 44)
 
-    private fun destroyRecognizerInternal() {
-        runCatching {
-            speechRecognizer?.stopListening()
-            speechRecognizer?.cancel()
-            speechRecognizer?.destroy()
+        val header = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN)
+        header.put("RIFF".toByteArray(Charsets.US_ASCII))
+        header.putInt(totalDataLen)
+        header.put("WAVE".toByteArray(Charsets.US_ASCII))
+        header.put("fmt ".toByteArray(Charsets.US_ASCII))
+        header.putInt(16) // PCM chunk size
+        header.putShort(1) // AudioFormat = 1 (PCM)
+        header.putShort(1) // Mono = 1 channel
+        header.putInt(sampleRate)
+        header.putInt(byteRate)
+        header.putShort(2) // BlockAlign = 2 bytes
+        header.putShort(16) // BitsPerSample = 16
+        header.put("data".toByteArray(Charsets.US_ASCII))
+        header.putInt(byteDataSize)
+        out.write(header.array())
+
+        val pcmBuf = ByteBuffer.allocate(byteDataSize).order(ByteOrder.LITTLE_ENDIAN)
+        for (s in pcmSamples) {
+            pcmBuf.putShort(s)
         }
-        speechRecognizer = null
+        out.write(pcmBuf.array())
+        return out.toByteArray()
     }
 
     /**
-     * Records a 3.2-second voiceprint sample of the user saying the wake phrase (e.g., "hey Luna 我需要你")
-     * and extracts their personal acoustic feature vector (Pitch F0, ZCR, and 8-band spectral envelope).
+     * Records a 3.0-second voiceprint sample of the user saying the wake phrase (e.g., "hey Luna 我需要你")
+     * using the exact same AudioSource and acoustic feature extractor as standby verification.
      */
     @SuppressLint("MissingPermission")
     suspend fun enrollVoiceprintSample(existingDataJson: String): Result<VoiceprintProfile> = withContext(Dispatchers.IO) {
@@ -341,8 +554,8 @@ class WakeWordManager(
             return@withContext Result.failure(IllegalStateException("請先授予麥克風權限"))
         }
         isEnrollingVoiceprint = true
-        stopListeningOnMainThread()
-        delay(250)
+        stopContinuousStandbyJob()
+        delay(300L)
 
         try {
             val sampleRate = 16000
@@ -352,17 +565,8 @@ class WakeWordManager(
                 AudioFormat.ENCODING_PCM_16BIT
             ).coerceAtLeast(3200)
 
-            val recorder = AudioRecord(
-                MediaRecorder.AudioSource.MIC,
-                sampleRate,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-                minBuf * 2
-            )
-
-            if (recorder.state != AudioRecord.STATE_INITIALIZED) {
-                return@withContext Result.failure(IllegalStateException("無法啟動麥克風錄製聲紋"))
-            }
+            val recorder = createWakeAudioRecord(sampleRate, minBuf * 2)
+                ?: return@withContext Result.failure(IllegalStateException("無法啟動麥克風錄製聲紋"))
 
             val totalSamplesToCapture = sampleRate * 3 // 3.0 seconds at 16kHz
             val captured = ShortArray(totalSamplesToCapture)
@@ -410,56 +614,15 @@ class WakeWordManager(
                 )
             }
 
+            enrolledProfile = merged
             Result.success(merged)
         } finally {
             isEnrollingVoiceprint = false
             if (isStandbyEnabled && !isPausedForActiveCall) {
-                startListeningOnMainThread()
+                startContinuousStandbyJobIfNeeded()
             }
         }
     }
-
-    @SuppressLint("MissingPermission")
-    private suspend fun captureQuickVoiceprintVerificationSample(durationMs: Long): VoiceprintProfile? =
-        withContext(Dispatchers.IO) {
-            runCatching {
-                val sampleRate = 16000
-                val minBuf = AudioRecord.getMinBufferSize(
-                    sampleRate,
-                    AudioFormat.CHANNEL_IN_MONO,
-                    AudioFormat.ENCODING_PCM_16BIT
-                ).coerceAtLeast(2048)
-
-                val recorder = AudioRecord(
-                    MediaRecorder.AudioSource.MIC,
-                    sampleRate,
-                    AudioFormat.CHANNEL_IN_MONO,
-                    AudioFormat.ENCODING_PCM_16BIT,
-                    minBuf
-                )
-                if (recorder.state != AudioRecord.STATE_INITIALIZED) return@withContext null
-
-                val totalSamples = ((sampleRate * durationMs) / 1000L).toInt()
-                val captured = ShortArray(totalSamples)
-                var offset = 0
-                recorder.startRecording()
-                try {
-                    val buf = ShortArray(512)
-                    val start = System.currentTimeMillis()
-                    while (offset < totalSamples && System.currentTimeMillis() - start < durationMs + 120L) {
-                        val read = recorder.read(buf, 0, minOf(buf.size, totalSamples - offset))
-                        if (read > 0) {
-                            System.arraycopy(buf, 0, captured, offset, read)
-                            offset += read
-                        }
-                    }
-                } finally {
-                    runCatching { recorder.stop() }
-                    runCatching { recorder.release() }
-                }
-                extractAcousticVoiceprint(captured, offset, sampleRate, minVoicedFrames = 2)
-            }.getOrNull()
-        }
 
     private fun extractAcousticVoiceprint(
         samples: ShortArray,
@@ -494,7 +657,7 @@ class WakeWordManager(
                 }
             }
             val rms = sqrt(sumSq / frameSize)
-            if (rms > 0.018) { // Voiced speech frame gate
+            if (rms > 0.014) { // Voiced speech frame gate
                 voicedFrames++
                 zcrs.add(zeroCrossings.toFloat() / frameSize)
 
@@ -522,7 +685,7 @@ class WakeWordManager(
                         }
                     }
                 }
-                if (maxCorr > 0.0004) {
+                if (maxCorr > 0.0003) {
                     pitches.add(sampleRate.toFloat() / bestLag)
                 }
 
@@ -593,16 +756,10 @@ class WakeWordManager(
 
         // 2. Pitch F0 proximity score
         val pitchDiffRatio = abs(enrolled.meanPitchHz - candidate.meanPitchHz) / enrolled.meanPitchHz.coerceAtLeast(80f)
-        val pitchSim = (1f - pitchDiffRatio * 0.9f).coerceIn(0.4f, 1f)
+        val pitchSim = (1f - pitchDiffRatio * 0.85f).coerceIn(0.45f, 1f)
 
-        val combined = (cosine * 0.72f + pitchSim * 0.28f) * 100f
+        val combined = (cosine * 0.74f + pitchSim * 0.26f) * 100f
         return combined.roundToInt().coerceIn(0, 100)
-    }
-
-    private fun evaluateRmsEnvelopeSimilarity(rmsList: List<Float>): Int {
-        if (rmsList.size < 4) return 75
-        val peak = rmsList.maxOrNull() ?: 0f
-        return if (peak >= 4.2f) 88 else 74
     }
 
     fun playWakeChimeAndVibrate() {
@@ -643,10 +800,8 @@ class WakeWordManager(
 
     companion object {
         /**
-         * Normalizes mixed English/Chinese speech transcripts so the user's custom wake phrase
-         * (especially `"hey Luna 我需要你"`) is reliably recognized even if Android STT transcribes
-         * `"hey Luna"` as `"嘿露娜"`, `"黑露娜"`, `"嘿路娜"`, `"hey lona"`, etc., while strictly requiring
-         * the full compound phrase so casual bystander conversation never false-triggers!
+         * Normalizes mixed English/Chinese speech transcripts so `"hey Luna 我需要你"` (or custom wake phrases)
+         * are reliably recognized across English/Traditional/Simplified transcriptions and homophones.
          */
         fun matchesWakePhrase(spokenRaw: String, configuredPhraseRaw: String): Boolean {
             val spokenNorm = normalizeForWakeComparison(spokenRaw)
@@ -655,37 +810,61 @@ class WakeWordManager(
 
             if (spokenNorm.contains(targetNorm)) return true
 
-            // Special phonetic support for "hey Luna 我需要你" (and any phrase containing luna + 我需要你)
             val targetHasLuna = targetNorm.contains("luna")
-            val targetHasNeedYou = targetNorm.contains("我需要你") || targetNorm.contains("需要你")
-            if (targetHasLuna && targetHasNeedYou) {
+            val targetHasNeedYou = targetNorm.contains("需要你")
+            if (targetHasLuna || targetHasNeedYou) {
                 val spokenHasLuna = spokenNorm.contains("luna")
-                val spokenHasNeedYou =
-                    spokenNorm.contains("我需要你") ||
-                            spokenNorm.contains("需要你") ||
-                            spokenNorm.contains("我需要妳") ||
-                            spokenNorm.contains("需要妳")
-                if (spokenHasLuna && spokenHasNeedYou) {
-                    return true
-                }
+                val spokenHasHey = spokenNorm.contains("hey")
+                val spokenHasNeedYou = spokenNorm.contains("需要你") ||
+                        spokenNorm.contains("需要") ||
+                        spokenNorm.contains("找你") ||
+                        spokenNorm.contains("幫我")
+                // Match if:
+                // 1) "luna" + "需要你/需要"
+                // 2) "heyluna" (when user says "hey Luna 我需要你" and STT catches hey luna + partial)
+                // 3) Short wake command containing "我需要你" + ("hey" or "luna")
+                if (spokenHasLuna && spokenHasNeedYou) return true
+                if (spokenNorm.contains("heyluna") && spokenNorm.length >= 7) return true
+                if (spokenHasHey && spokenNorm.contains("我需要你") && spokenNorm.length <= 16) return true
             }
             return false
         }
 
         private fun normalizeForWakeComparison(input: String): String {
             var s = input.lowercase(Locale.ROOT)
-                .replace(Regex("[\\s,，.。!！?？、~～\"'「」『』（）()-]"), "")
+                .replace(Regex("[\\s,，.。!！?？、~～\"'「」『』（）()\\-_]"), "")
+
+            // Simplified / variant Chinese normalization for "我需要你"
+            s = s.replace("需要妳", "需要你")
+                .replace("須要你", "需要你")
+                .replace("須要妳", "需要你")
+                .replace("需要泥", "需要你")
+                .replace("想要你", "需要你")
+
             // Map common Chinese/English STT homophones of "Hey Luna" -> "heyluna"
-            val lunaHomophones = listOf(
+            val heyLunaHomophones = listOf(
                 "嘿露娜", "黑露娜", "嘿路娜", "黑路娜", "嘿嚕娜", "黑嚕娜",
-                "嘿盧娜", "黑盧娜", "嘿如娜", "heylona", "heiluna", "haluna"
+                "嘿盧娜", "黑盧娜", "嘿如娜", "嘿羅娜", "黑羅娜", "嗨露娜", "嗨路娜",
+                "嘿露那", "黑露那", "嘿路那", "黑路那", "heylona", "heiluna", "haluna", "hiluna"
             )
-            for (h in lunaHomophones) {
+            for (h in heyLunaHomophones) {
                 s = s.replace(h, "heyluna")
             }
-            val lunaShortHomophones = listOf("露娜", "路娜", "嚕娜", "盧娜", "lona")
+
+            val lunaShortHomophones = listOf(
+                "露娜", "路娜", "嚕娜", "盧娜", "如娜", "羅娜", "洛娜",
+                "露那", "路那", "嚕那", "盧那", "如那", "羅那",
+                "lona", "luma", "runa", "rula"
+            )
             for (h in lunaShortHomophones) {
                 s = s.replace(h, "luna")
+            }
+
+            val heyHomophones = listOf("嘿", "黑", "嗨", "欸", "喂", "hi", "hello", "hei")
+            for (h in heyHomophones) {
+                if (s.startsWith(h)) {
+                    s = "hey" + s.removePrefix(h)
+                }
             }
             return s
         }

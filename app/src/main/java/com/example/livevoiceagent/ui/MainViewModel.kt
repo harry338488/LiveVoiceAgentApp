@@ -190,6 +190,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
         if (_uiState.value.connectionState == ConnectionState.DISCONNECTED) {
             if (newSettings.wakeWordEnabled) {
                 if (!oldSettings.wakeWordEnabled ||
+                    oldSettings.openAiApiKey != newSettings.openAiApiKey ||
                     oldSettings.wakeWordPhrase != newSettings.wakeWordPhrase ||
                     oldSettings.wakeWordVoiceprintEnabled != newSettings.wakeWordVoiceprintEnabled ||
                     oldSettings.wakeWordVoiceprintData != newSettings.wakeWordVoiceprintData
