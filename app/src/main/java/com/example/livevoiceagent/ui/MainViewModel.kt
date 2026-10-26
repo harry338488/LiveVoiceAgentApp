@@ -7,6 +7,7 @@ import com.example.livevoiceagent.data.ConversationRepository
 import com.example.livevoiceagent.model.*
 import com.example.livevoiceagent.network.*
 import com.example.livevoiceagent.tools.CalendarToolManager
+import com.example.livevoiceagent.tools.LocationMapsToolManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -47,11 +48,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
     private val modelFetcher = ModelFetcher()
     private val linkupClient = LinkupSearchClient()
     private val calendarToolManager = CalendarToolManager(application.applicationContext)
-    private val backendLlmClient = BackendLlmClient(linkupClient, calendarToolManager)
+    private val locationMapsToolManager = LocationMapsToolManager(application.applicationContext, linkupClient)
+    private val backendLlmClient = BackendLlmClient(linkupClient, calendarToolManager, locationMapsToolManager)
     private val liveSessionManager = LiveSessionManager(
         context = application.applicationContext,
         linkupClient = linkupClient,
         calendarToolManager = calendarToolManager,
+        locationMapsToolManager = locationMapsToolManager,
         backendLlmClient = backendLlmClient,
         listener = this
     )

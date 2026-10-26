@@ -57,6 +57,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.livevoiceagent.model.*
 import com.example.livevoiceagent.network.ConnectionState
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -66,21 +67,21 @@ import kotlin.math.sin
 
 private val DeepSpaceBgBrush = Brush.verticalGradient(
     colors = listOf(
-        Color(0xFF070B14),
+        Color(0xFF090D16),
         Color(0xFF0F172A),
-        Color(0xFF090D18)
+        Color(0xFF090D16)
     )
 )
 
 private val UserBubbleGradient = Brush.linearGradient(
     colors = listOf(
-        Color(0xFF2563EB),
+        Color(0xFF1E40AF),
         Color(0xFF1D4ED8)
     )
 )
 
-private val AssistantCardBg = Color(0xFF151F32).copy(alpha = 0.88f)
-private val GlassSurfaceBg = Color(0xFF1E293B).copy(alpha = 0.65f)
+private val AssistantCardBg = Color(0xFF161F30).copy(alpha = 0.94f)
+private val GlassSurfaceBg = Color(0xFF1E293B).copy(alpha = 0.72f)
 private val CyanAccent = Color(0xFF38BDF8)
 private val VioletAccent = Color(0xFFA855F7)
 private val EmeraldAccent = Color(0xFF10B981)
@@ -95,12 +96,19 @@ fun MainScreen(
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val context = LocalContext.current
-    var selectedTab by remember { mutableIntStateOf(0) }
+    val scope = rememberCoroutineScope()
+    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
+
+    // RikkaHub-style single workspace: "CHAT" is the primary full-screen workspace, "SETTINGS" is opened from Drawer
+    var showFullSettingsScreen by remember { mutableStateOf(false) }
+    var showModeConfigBottomSheet by remember { mutableStateOf(false) }
+    var showNotebookDialog by remember { mutableStateOf(false) }
     var showMemoryDialog by remember { mutableStateOf(false) }
 
     val currentMode = uiState.settings.appMode
     val isTranslationMode = currentMode == AppMode.TRANSLATE
     val isTutorMode = currentMode == AppMode.TUTOR
+    val isConnected = uiState.connectionState != ConnectionState.DISCONNECTED
     val hasActiveMemory = uiState.settings.longTermMemoryEnabled && uiState.settings.userMemoryProfile.isNotBlank()
 
     LaunchedEffect(uiState.errorToast) {
@@ -110,260 +118,294 @@ fun MainScreen(
         }
     }
 
-    Scaffold(
-        containerColor = Color.Transparent,
-        topBar = {
-            Surface(
-                color = Color(0xFF090E1A).copy(alpha = 0.92f),
-                tonalElevation = 0.dp
-            ) {
-                Column {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        // Brand Glowing Badge
-                        Box(
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        drawerContent = {
+            RikkaStyleNavigationDrawerSheet(
+                uiState = uiState,
+                currentMode = currentMode,
+                hasActiveMemory = hasActiveMemory,
+                showFullSettingsScreen = showFullSettingsScreen,
+                onStartNewChat = {
+                    viewModel.startNewConversationSession()
+                    showFullSettingsScreen = false
+                    scope.launch { drawerState.close() }
+                },
+                onSelectAppMode = { mode ->
+                    viewModel.setAppMode(mode)
+                    showFullSettingsScreen = false
+                    scope.launch { drawerState.close() }
+                },
+                onOpenNotebook = {
+                    scope.launch { drawerState.close() }
+                    showNotebookDialog = true
+                },
+                onOpenMemoryHub = {
+                    scope.launch { drawerState.close() }
+                    showMemoryDialog = true
+                },
+                onOpenSettingsScreen = {
+                    showFullSettingsScreen = true
+                    scope.launch { drawerState.close() }
+                },
+                onSearchQueryChange = { viewModel.updateHistorySearchQuery(it) },
+                onLoadSession = { session ->
+                    viewModel.loadSavedSession(session)
+                    showFullSettingsScreen = false
+                    scope.launch { drawerState.close() }
+                },
+                onExportSession = { session ->
+                    val md = viewModel.exportSessionMarkdown(session)
+                    copyToClipboard(context, session.title, md)
+                    Toast.makeText(context, "已複製「${session.title}」完整 Markdown 筆記", Toast.LENGTH_SHORT).show()
+                },
+                onDeleteSession = { id ->
+                    viewModel.deleteSavedSession(id)
+                }
+            )
+        }
+    ) {
+        Scaffold(
+            containerColor = Color.Transparent,
+            topBar = {
+                Surface(
+                    color = Color(0xFF0B111E).copy(alpha = 0.95f),
+                    tonalElevation = 0.dp
+                ) {
+                    Column {
+                        Row(
                             modifier = Modifier
-                                .size(38.dp)
-                                .clip(CircleShape)
-                                .background(
-                                    Brush.linearGradient(
-                                        when {
-                                            isTutorMode -> listOf(AmberTutorAccent, VioletAccent)
-                                            isTranslationMode -> listOf(EmeraldAccent, CyanAccent)
-                                            else -> listOf(CyanAccent, VioletAccent)
-                                        }
-                                    )
-                                ),
-                            contentAlignment = Alignment.Center
+                                .fillMaxWidth()
+                                .padding(horizontal = 8.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(
-                                imageVector = when {
-                                    isTutorMode -> Icons.Default.School
-                                    isTranslationMode -> Icons.Default.Translate
-                                    else -> Icons.Default.GraphicEq
-                                },
-                                contentDescription = null,
-                                tint = Color(0xFF06101E),
-                                modifier = Modifier.size(22.dp)
-                            )
-                        }
-
-                        Spacer(modifier = Modifier.width(12.dp))
-
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = uiState.currentSession.title,
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold,
-                                color = Color(0xFFF8FAFC),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            val subtitleText = when {
-                                isTutorMode -> {
-                                    val langShort = AppSettings.tutorLanguageLabel(uiState.settings.tutorTargetLanguage).substringBefore(" (")
-                                    "🎓 外語陪練：$langShort · ${uiState.settings.tutorLevel.shortLabel} · ${uiState.settings.tutorScenario.shortLabel}"
-                                }
-                                isTranslationMode -> {
-                                    "gpt-realtime-translate • 70+ 語言自動偵測 ➔ ${
-                                        AppSettings.languageLabel(uiState.settings.translationTargetLanguage)
-                                    }"
-                                }
-                                else -> {
-                                    "${uiState.settings.frontendVoiceModel} ⇄ ${uiState.settings.backendBrainModel}" +
-                                            (if (uiState.settings.linkupSearchEnabled) " · Linkup" else "") +
-                                            (if (uiState.settings.calendarToolsEnabled) " · 行事曆" else "")
-                                }
-                            }
-                            Text(
-                                text = subtitleText,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = when {
-                                    isTutorMode -> AmberTutorAccent
-                                    isTranslationMode -> EmeraldAccent
-                                    else -> CyanAccent
-                                },
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-
-                        // Long-Term Memory Hub Button
-                        IconButton(onClick = { showMemoryDialog = true }) {
-                            BadgedBox(
-                                badge = {
-                                    if (hasActiveMemory) {
-                                        Badge(containerColor = VioletAccent)
-                                    }
-                                }
-                            ) {
-                                Icon(
-                                    Icons.Default.Psychology,
-                                    contentDescription = "跨對話長期記憶庫",
-                                    tint = if (hasActiveMemory) VioletAccent else Color(0xFF94A3B8)
-                                )
-                            }
-                        }
-
-                        if (selectedTab == 0) {
+                            // Left: Drawer Menu Button OR Back from Settings
                             IconButton(
                                 onClick = {
-                                    val md = viewModel.exportSessionMarkdown(uiState.currentSession)
-                                    copyToClipboard(context, "Conversation Markdown", md)
-                                    Toast.makeText(context, "已複製當前對話完整 Markdown 筆記", Toast.LENGTH_SHORT).show()
+                                    if (showFullSettingsScreen) {
+                                        showFullSettingsScreen = false
+                                    } else {
+                                        scope.launch { drawerState.open() }
+                                    }
                                 }
                             ) {
                                 Icon(
-                                    Icons.Default.ContentCopy,
-                                    contentDescription = "複製完整對話筆記",
-                                    tint = Color(0xFFCBD5E1)
+                                    imageVector = if (showFullSettingsScreen) Icons.Default.ArrowBack else Icons.Default.Menu,
+                                    contentDescription = if (showFullSettingsScreen) "返回對話" else "開啟側邊選單",
+                                    tint = Color(0xFFE2E8F0)
                                 )
                             }
-                            IconButton(onClick = { viewModel.startNewConversationSession() }) {
-                                Icon(
-                                    Icons.Default.AddComment,
-                                    contentDescription = "開啟新對話",
-                                    tint = CyanAccent
+
+                            Spacer(modifier = Modifier.width(4.dp))
+
+                            // Center: RikkaHub-style Clean Title & Live Status Subtitle
+                            Column(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clickable(enabled = !showFullSettingsScreen) {
+                                        showModeConfigBottomSheet = true
+                                    }
+                            ) {
+                                Text(
+                                    text = if (showFullSettingsScreen) {
+                                        "⚙️ 模型、API 金鑰與工具設定"
+                                    } else {
+                                        uiState.currentSession.title
+                                    },
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFFF8FAFC),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
-                            }
-                        }
-                    }
-                    HorizontalDivider(color = Color.White.copy(alpha = 0.07f))
-                }
-            }
-        },
-        bottomBar = {
-            NavigationBar(
-                containerColor = Color(0xFF0B1120).copy(alpha = 0.96f),
-                tonalElevation = 0.dp
-            ) {
-                val navTab0Accent = when {
-                    isTutorMode -> AmberTutorAccent
-                    isTranslationMode -> EmeraldAccent
-                    else -> CyanAccent
-                }
-                NavigationBarItem(
-                    selected = selectedTab == 0,
-                    onClick = { selectedTab = 0 },
-                    icon = {
-                        Icon(
-                            when {
-                                isTutorMode -> Icons.Default.School
-                                isTranslationMode -> Icons.Default.Translate
-                                else -> Icons.Default.GraphicEq
-                            },
-                            contentDescription = null
-                        )
-                    },
-                    label = {
-                        Text(
-                            when {
-                                isTutorMode -> "外語口說陪練"
-                                isTranslationMode -> "即時同步口譯"
-                                else -> "即時語音對話"
-                            }
-                        )
-                    },
-                    colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = navTab0Accent,
-                        selectedTextColor = navTab0Accent,
-                        indicatorColor = navTab0Accent.copy(alpha = 0.16f)
-                    )
-                )
-                NavigationBarItem(
-                    selected = selectedTab == 1,
-                    onClick = { selectedTab = 1 },
-                    icon = {
-                        BadgedBox(
-                            badge = {
-                                if (uiState.savedSessions.isNotEmpty()) {
-                                    Badge(containerColor = VioletAccent) {
-                                        Text("${uiState.savedSessions.size}", color = Color.White)
+                                Spacer(modifier = Modifier.height(1.dp))
+                                val subtitleText = when {
+                                    showFullSettingsScreen -> "管理 OpenAI / xAI / Linkup 金鑰、定位導航與系統 Prompt"
+                                    isConnected -> uiState.statusBanner
+                                    isTutorMode -> {
+                                        val langShort = AppSettings.tutorLanguageLabel(uiState.settings.tutorTargetLanguage).substringBefore(" (")
+                                        "🎓 外語陪練 · $langShort (${uiState.settings.tutorLevel.shortLabel})"
+                                    }
+                                    isTranslationMode -> {
+                                        "🌐 同步口譯 · 自動偵測 ➔ ${AppSettings.languageLabel(uiState.settings.translationTargetLanguage).substringBefore(" (")}"
+                                    }
+                                    else -> {
+                                        "🎙️ ${uiState.settings.frontendVoiceModel} ⇄ ${uiState.settings.backendBrainModel}"
                                     }
                                 }
+                                Text(
+                                    text = subtitleText,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = when {
+                                        isConnected && uiState.connectionState == ConnectionState.DELEGATING -> VioletAccent
+                                        isTutorMode -> AmberTutorAccent
+                                        isTranslationMode -> EmeraldAccent
+                                        else -> CyanAccent
+                                    },
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
                             }
-                        ) {
-                            Icon(Icons.Default.History, contentDescription = null)
+
+                            // Call Timer Pill if active
+                            if (uiState.voiceUsageSeconds > 0 && !showFullSettingsScreen) {
+                                val mins = uiState.voiceUsageSeconds / 60
+                                val secs = uiState.voiceUsageSeconds % 60
+                                Surface(
+                                    shape = RoundedCornerShape(50),
+                                    color = EmeraldAccent.copy(alpha = 0.16f),
+                                    border = BorderStroke(0.5.dp, EmeraldAccent.copy(alpha = 0.5f)),
+                                    modifier = Modifier.padding(end = 4.dp)
+                                ) {
+                                    Text(
+                                        text = String.format(Locale.US, "%02d:%02d", mins, secs),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = FontWeight.Bold,
+                                        color = EmeraldAccent,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                    )
+                                }
+                            }
+
+                            if (!showFullSettingsScreen) {
+                                // Mode Quick Config BottomSheet Trigger
+                                IconButton(onClick = { showModeConfigBottomSheet = true }) {
+                                    Icon(
+                                        Icons.Default.Tune,
+                                        contentDescription = "當前模式與工具快速設定",
+                                        tint = when {
+                                            isTutorMode -> AmberTutorAccent
+                                            isTranslationMode -> EmeraldAccent
+                                            else -> CyanAccent
+                                        }
+                                    )
+                                }
+
+                                // Copy Markdown Button
+                                IconButton(
+                                    onClick = {
+                                        val md = viewModel.exportSessionMarkdown(uiState.currentSession)
+                                        copyToClipboard(context, "Conversation Markdown", md)
+                                        Toast.makeText(context, "已複製當前對話完整 Markdown 筆記", Toast.LENGTH_SHORT).show()
+                                    }
+                                ) {
+                                    Icon(
+                                        Icons.Default.ContentCopy,
+                                        contentDescription = "複製完整對話筆記",
+                                        tint = Color(0xFFCBD5E1)
+                                    )
+                                }
+
+                                // New Chat Button
+                                IconButton(onClick = { viewModel.startNewConversationSession() }) {
+                                    Icon(
+                                        Icons.Default.AddComment,
+                                        contentDescription = "開啟新對話",
+                                        tint = CyanAccent
+                                    )
+                                }
+                            }
                         }
-                    },
-                    label = { Text("對話紀錄留存") },
-                    colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = CyanAccent,
-                        selectedTextColor = CyanAccent,
-                        indicatorColor = CyanAccent.copy(alpha = 0.16f)
+                        HorizontalDivider(color = Color.White.copy(alpha = 0.06f))
+                    }
+                }
+            }
+        ) { innerPadding ->
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(DeepSpaceBgBrush)
+                    .padding(innerPadding)
+            ) {
+                if (showFullSettingsScreen) {
+                    SettingsAndModelFetchTab(
+                        uiState = uiState,
+                        onUpdateSettings = { viewModel.updateSettings(it) },
+                        onFetchModels = { viewModel.fetchModelsFromApis() },
+                        onOpenMemoryHub = { showMemoryDialog = true }
                     )
-                )
-                NavigationBarItem(
-                    selected = selectedTab == 2,
-                    onClick = { selectedTab = 2 },
-                    icon = { Icon(Icons.Default.Tune, contentDescription = null) },
-                    label = { Text("模型與 API 設定") },
-                    colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = CyanAccent,
-                        selectedTextColor = CyanAccent,
-                        indicatorColor = CyanAccent.copy(alpha = 0.16f)
+                } else {
+                    LiveConversationTab(
+                        uiState = uiState,
+                        currentMode = currentMode,
+                        onOpenModeConfigSheet = { showModeConfigBottomSheet = true },
+                        onOpenNotebookDialog = { showNotebookDialog = true },
+                        onSelectTargetLanguage = { viewModel.setTranslationTargetLanguage(it) },
+                        onSelectSecondaryLanguage = { viewModel.setTranslationSecondaryLanguage(it) },
+                        onUpdateSettings = { viewModel.updateSettings(it) },
+                        onTriggerTutorQuickAction = { viewModel.triggerTutorQuickAction(it) },
+                        onToggleCall = onRequestMicPermissionAndToggleCall,
+                        onToggleMute = { viewModel.toggleMute() },
+                        onToggleSpeaker = { viewModel.toggleSpeakerphone() },
+                        onSendTypedMessage = { viewModel.sendTypedMessage(it) },
+                        onSendImageMessage = { bmp, prompt -> viewModel.sendImageMessage(bmp, prompt) },
+                        onPlayMessageVoiceClip = { path, speed -> viewModel.playMessageVoiceClip(path, speed) },
+                        onSaveMessageToNotebook = { msg -> viewModel.saveMessageToTutorNotebook(msg) }
                     )
-                )
+                }
             }
         }
-    ) { innerPadding ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(DeepSpaceBgBrush)
-                .padding(innerPadding)
+    }
+
+    // Contextual Mode & Tool Configuration ModalBottomSheet (RikkaHub style!)
+    if (showModeConfigBottomSheet) {
+        ModalBottomSheet(
+            onDismissRequest = { showModeConfigBottomSheet = false },
+            containerColor = Color(0xFF0F172A),
+            contentColor = Color(0xFFF8FAFC),
+            tonalElevation = 0.dp
         ) {
-            when (selectedTab) {
-                0 -> LiveConversationTab(
-                    uiState = uiState,
-                    currentMode = currentMode,
-                    onSelectAppMode = { viewModel.setAppMode(it) },
-                    onSelectTargetLanguage = { viewModel.setTranslationTargetLanguage(it) },
-                    onSelectSecondaryLanguage = { viewModel.setTranslationSecondaryLanguage(it) },
-                    onUpdateSettings = { viewModel.updateSettings(it) },
-                    onUpdateTutorConfig = { newSettings, restartGreeting ->
-                        viewModel.updateTutorConfig(newSettings, restartGreeting)
-                    },
-                    onTriggerTutorQuickAction = { viewModel.triggerTutorQuickAction(it) },
-                    onToggleCall = onRequestMicPermissionAndToggleCall,
-                    onToggleMute = { viewModel.toggleMute() },
-                    onToggleSpeaker = { viewModel.toggleSpeakerphone() },
-                    onSendTypedMessage = { viewModel.sendTypedMessage(it) },
-                    onSendImageMessage = { bmp, prompt -> viewModel.sendImageMessage(bmp, prompt) },
-                    onPlayMessageVoiceClip = { path, speed -> viewModel.playMessageVoiceClip(path, speed) },
-                    onSaveMessageToNotebook = { msg -> viewModel.saveMessageToTutorNotebook(msg) },
-                    onDeleteNotebookEntry = { id -> viewModel.deleteTutorNotebookEntry(id) },
-                    onExportNotebookAnki = { viewModel.exportNotebookToAnki() }
-                )
-
-                1 -> HistorySessionsTab(
-                    uiState = uiState,
-                    onSearchQueryChange = { viewModel.updateHistorySearchQuery(it) },
-                    onLoadSession = { session ->
-                        viewModel.loadSavedSession(session)
-                        selectedTab = 0
-                    },
-                    onExportSession = { session ->
-                        val md = viewModel.exportSessionMarkdown(session)
-                        copyToClipboard(context, session.title, md)
-                        Toast.makeText(context, "已複製「${session.title}」完整筆記", Toast.LENGTH_SHORT).show()
-                    },
-                    onDeleteSession = { viewModel.deleteSavedSession(it) }
-                )
-
-                2 -> SettingsAndModelFetchTab(
-                    uiState = uiState,
-                    onUpdateSettings = { viewModel.updateSettings(it) },
-                    onFetchModels = { viewModel.fetchModelsFromApis() },
-                    onOpenMemoryHub = { showMemoryDialog = true }
-                )
-            }
+            ModeConfigBottomSheetContent(
+                uiState = uiState,
+                currentMode = currentMode,
+                onSelectAppMode = { viewModel.setAppMode(it) },
+                onUpdateSettings = { viewModel.updateSettings(it) },
+                onUpdateTutorConfig = { newSettings, restartGreeting ->
+                    viewModel.updateTutorConfig(newSettings, restartGreeting)
+                },
+                onSelectTargetLanguage = { viewModel.setTranslationTargetLanguage(it) },
+                onSelectSecondaryLanguage = { viewModel.setTranslationSecondaryLanguage(it) },
+                onOpenNotebook = {
+                    showModeConfigBottomSheet = false
+                    showNotebookDialog = true
+                },
+                onOpenFullSettings = {
+                    showModeConfigBottomSheet = false
+                    showFullSettingsScreen = true
+                },
+                onDismiss = { showModeConfigBottomSheet = false }
+            )
         }
+    }
+
+    if (showNotebookDialog) {
+        TutorNotebookDialog(
+            settings = uiState.settings,
+            entries = uiState.tutorNotebook,
+            onDismiss = { showNotebookDialog = false },
+            onToggleInjectWeaknesses = { enabled ->
+                viewModel.updateTutorConfig(uiState.settings.copy(tutorInjectNotebookWeaknesses = enabled), false)
+            },
+            onDeleteEntry = { id -> viewModel.deleteTutorNotebookEntry(id) },
+            onExportAnki = {
+                val tsv = viewModel.exportNotebookToAnki()
+                if (tsv.isBlank()) {
+                    Toast.makeText(context, "複習本目前是空的", Toast.LENGTH_SHORT).show()
+                } else {
+                    copyToClipboard(context, "Anki Flashcards TSV", tsv)
+                    Toast.makeText(
+                        context,
+                        "已複製 ${uiState.tutorNotebook.size} 筆 Anki 字卡 (TSV 格式) 到剪貼簿！",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            },
+            onCopyItem = { text ->
+                copyToClipboard(context, "Notebook Item", text)
+                Toast.makeText(context, "已複製句子與解析", Toast.LENGTH_SHORT).show()
+            }
+        )
     }
 
     if (showMemoryDialog) {
@@ -386,14 +428,391 @@ fun MainScreen(
 }
 
 @Composable
+private fun RikkaStyleNavigationDrawerSheet(
+    uiState: UiState,
+    currentMode: AppMode,
+    hasActiveMemory: Boolean,
+    showFullSettingsScreen: Boolean,
+    onStartNewChat: () -> Unit,
+    onSelectAppMode: (AppMode) -> Unit,
+    onOpenNotebook: () -> Unit,
+    onOpenMemoryHub: () -> Unit,
+    onOpenSettingsScreen: () -> Unit,
+    onSearchQueryChange: (String) -> Unit,
+    onLoadSession: (ConversationSession) -> Unit,
+    onExportSession: (ConversationSession) -> Unit,
+    onDeleteSession: (String) -> Unit
+) {
+    val query = uiState.historySearchQuery.trim().lowercase()
+    val filteredSessions = remember(uiState.savedSessions, query) {
+        if (query.isEmpty()) {
+            uiState.savedSessions
+        } else {
+            uiState.savedSessions.filter { s ->
+                s.title.lowercase().contains(query) ||
+                        s.messages.any { m ->
+                            m.text.lowercase().contains(query) ||
+                                    m.backendThinkingText.lowercase().contains(query)
+                        }
+            }
+        }
+    }
+    val sdf = remember { SimpleDateFormat("MM/dd HH:mm", Locale.getDefault()) }
+
+    ModalDrawerSheet(
+        drawerContainerColor = Color(0xFF0B111E),
+        drawerContentColor = Color(0xFFF8FAFC),
+        modifier = Modifier.width(315.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 12.dp, vertical = 12.dp)
+        ) {
+            // Drawer Brand Header + New Chat Button
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 6.dp, vertical = 4.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(CircleShape)
+                        .background(Brush.linearGradient(listOf(CyanAccent, VioletAccent))),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.GraphicEq,
+                        contentDescription = null,
+                        tint = Color(0xFF06101E),
+                        modifier = Modifier.size(19.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.width(10.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "LiveVoiceAgent",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color.White
+                    )
+                    Text(
+                        text = "雙腦全雙工語音 · 定位導航 · 外語家教",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFF94A3B8)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Button(
+                onClick = onStartNewChat,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = CyanAccent,
+                    contentColor = Color(0xFF06101E)
+                ),
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(Icons.Default.AddComment, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("開啟新對話 (New Chat)", fontWeight = FontWeight.Bold)
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Section 1: 3-Mode Switcher
+            Text(
+                text = "工作模式",
+                style = MaterialTheme.typography.labelSmall,
+                color = Color(0xFF94A3B8),
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+            )
+
+            DrawerModeItem(
+                title = "🎙️ 全雙工語音助理",
+                subtitle = "GPS 定位 · Google Maps 導航 · Linkup · 行事曆",
+                selected = !showFullSettingsScreen && currentMode == AppMode.ASSISTANT,
+                accentColor = CyanAccent,
+                onClick = { onSelectAppMode(AppMode.ASSISTANT) }
+            )
+            DrawerModeItem(
+                title = "🌐 即時雙向同步口譯",
+                subtitle = "70+ 語言自動聽辨 · 雙語按鍵極速切換",
+                selected = !showFullSettingsScreen && currentMode == AppMode.TRANSLATE,
+                accentColor = EmeraldAccent,
+                onClick = { onSelectAppMode(AppMode.TRANSLATE) }
+            )
+            DrawerModeItem(
+                title = "🎓 AI 外語口說陪練家教",
+                subtitle = "中日/中英混講救星 · 假名標音 · 0.75x 跟讀",
+                selected = !showFullSettingsScreen && currentMode == AppMode.TUTOR,
+                accentColor = AmberTutorAccent,
+                onClick = { onSelectAppMode(AppMode.TUTOR) }
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+            HorizontalDivider(color = Color.White.copy(alpha = 0.07f))
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Section 2: Quick Hubs (Notebook, Memory, Model & API Settings)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color(0xFF161F30),
+                    border = BorderStroke(0.5.dp, AmberTutorAccent.copy(alpha = 0.4f)),
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable { onOpenNotebook() }
+                ) {
+                    Column(
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = "📒 複習本 (${uiState.tutorNotebook.size})",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFFFDE68A),
+                            maxLines = 1
+                        )
+                    }
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color(0xFF161F30),
+                    border = BorderStroke(
+                        0.5.dp,
+                        if (hasActiveMemory) VioletAccent else Color.White.copy(alpha = 0.15f)
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable { onOpenMemoryHub() }
+                ) {
+                    Column(
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = if (hasActiveMemory) "🧠 記憶庫 (開)" else "🧠 長期記憶",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = if (hasActiveMemory) Color(0xFFE9D5FF) else Color(0xFFCBD5E1),
+                            maxLines = 1
+                        )
+                    }
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = if (showFullSettingsScreen) CyanAccent.copy(alpha = 0.2f) else Color(0xFF161F30),
+                    border = BorderStroke(
+                        0.5.dp,
+                        if (showFullSettingsScreen) CyanAccent else Color.White.copy(alpha = 0.15f)
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable { onOpenSettingsScreen() }
+                ) {
+                    Column(
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = "⚙️ API 設定",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = if (showFullSettingsScreen) CyanAccent else Color(0xFFCBD5E1),
+                            maxLines = 1
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+            HorizontalDivider(color = Color.White.copy(alpha = 0.07f))
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Section 3: RikkaHub-style Searchable Conversation History List
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(horizontal = 6.dp)
+            ) {
+                Text(
+                    text = "歷史對話紀錄 (${uiState.savedSessions.size})",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFF94A3B8),
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            OutlinedTextField(
+                value = uiState.historySearchQuery,
+                onValueChange = onSearchQueryChange,
+                leadingIcon = {
+                    Icon(
+                        Icons.Default.Search,
+                        contentDescription = null,
+                        tint = CyanAccent,
+                        modifier = Modifier.size(17.dp)
+                    )
+                },
+                placeholder = {
+                    Text(
+                        "搜尋對話或筆記...",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFF64748B)
+                    )
+                },
+                singleLine = true,
+                textStyle = MaterialTheme.typography.bodySmall.copy(color = Color.White),
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            if (filteredSessions.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "尚無對話紀錄",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFF64748B)
+                    )
+                }
+            } else {
+                LazyColumn(
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                ) {
+                    items(filteredSessions, key = { it.id }) { session ->
+                        val isCurrent = session.id == uiState.currentSession.id && !showFullSettingsScreen
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (isCurrent) Color(0xFF1E293B) else Color(0xFF131B2B),
+                            border = BorderStroke(
+                                0.5.dp,
+                                if (isCurrent) CyanAccent.copy(alpha = 0.6f) else Color.White.copy(alpha = 0.06f)
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onLoadSession(session) }
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = session.title,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Medium,
+                                        color = if (isCurrent) Color.White else Color(0xFFE2E8F0),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = "${sdf.format(Date(session.updatedAt))} · ${session.messages.size} 則",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color(0xFF94A3B8)
+                                    )
+                                }
+                                IconButton(
+                                    onClick = { onExportSession(session) },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.ContentCopy,
+                                        contentDescription = "複製",
+                                        tint = Color(0xFF94A3B8),
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                }
+                                IconButton(
+                                    onClick = { onDeleteSession(session.id) },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.Delete,
+                                        contentDescription = "刪除",
+                                        tint = RoseDanger.copy(alpha = 0.8f),
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DrawerModeItem(
+    title: String,
+    subtitle: String,
+    selected: Boolean,
+    accentColor: Color,
+    onClick: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = if (selected) accentColor.copy(alpha = 0.16f) else Color.Transparent,
+        border = BorderStroke(
+            width = if (selected) 1.dp else 0.dp,
+            color = if (selected) accentColor.copy(alpha = 0.55f) else Color.Transparent
+        ),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp)
+            .clickable { onClick() }
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                color = if (selected) Color.White else Color(0xFFCBD5E1)
+            )
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.labelSmall,
+                color = if (selected) accentColor else Color(0xFF64748B),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
 private fun LiveConversationTab(
     uiState: UiState,
     currentMode: AppMode,
-    onSelectAppMode: (AppMode) -> Unit,
+    onOpenModeConfigSheet: () -> Unit,
+    onOpenNotebookDialog: () -> Unit,
     onSelectTargetLanguage: (String) -> Unit,
     onSelectSecondaryLanguage: (String) -> Unit,
     onUpdateSettings: (AppSettings) -> Unit,
-    onUpdateTutorConfig: (AppSettings, Boolean) -> Unit,
     onTriggerTutorQuickAction: (String) -> Unit,
     onToggleCall: () -> Unit,
     onToggleMute: () -> Unit,
@@ -401,17 +820,13 @@ private fun LiveConversationTab(
     onSendTypedMessage: (String) -> Unit,
     onSendImageMessage: (Bitmap, String) -> Unit,
     onPlayMessageVoiceClip: (String, Float) -> Unit,
-    onSaveMessageToNotebook: (ChatMessage) -> Unit,
-    onDeleteNotebookEntry: (String) -> Unit,
-    onExportNotebookAnki: () -> String
+    onSaveMessageToNotebook: (ChatMessage) -> Unit
 ) {
     val listState = rememberLazyListState()
     val context = LocalContext.current
     var typedInput by remember { mutableStateOf("") }
     var showKeyboardBar by remember { mutableStateOf(false) }
 
-    val isTranslationMode = currentMode == AppMode.TRANSLATE
-    val isTutorMode = currentMode == AppMode.TUTOR
     val messages = uiState.currentSession.messages
     val savedNotebookSentences = remember(uiState.tutorNotebook) {
         uiState.tutorNotebook.mapTo(hashSetOf()) { it.aiSentence.trim() }
@@ -424,52 +839,19 @@ private fun LiveConversationTab(
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        // 1. Top 3-Way Segmented Mode Switcher: [🎙️ 語音助理] | [🌐 同步口譯] | [🎓 外語陪練]
-        ModeSegmentedSwitcher(
+        // 1. RikkaHub-Style Slim Contextual Mode Bar (Replaces the bulky 4-row stacked panels!)
+        SlimContextualModeHeaderBar(
+            uiState = uiState,
             currentMode = currentMode,
-            onSelectAppMode = onSelectAppMode
+            onOpenModeConfigSheet = onOpenModeConfigSheet,
+            onOpenNotebookDialog = onOpenNotebookDialog,
+            onSelectTargetLanguage = onSelectTargetLanguage,
+            onSelectSecondaryLanguage = onSelectSecondaryLanguage,
+            onUpdateSettings = onUpdateSettings,
+            onTriggerTutorQuickAction = onTriggerTutorQuickAction
         )
 
-        // 2A. If in Translation Mode, show Output Language Console & Glossary/Prompt button
-        AnimatedVisibility(
-            visible = isTranslationMode,
-            enter = expandVertically() + fadeIn(),
-            exit = shrinkVertically() + fadeOut()
-        ) {
-            TranslationLanguageControlBar(
-                settings = uiState.settings,
-                onSelectTargetLanguage = onSelectTargetLanguage,
-                onSelectSecondaryLanguage = onSelectSecondaryLanguage,
-                onUpdateSettings = onUpdateSettings
-            )
-        }
-
-        // 2B. If in Language Tutor Mode, show the Language, Proficiency Level, Roleplay Scenario & Live Coach Console!
-        AnimatedVisibility(
-            visible = isTutorMode,
-            enter = expandVertically() + fadeIn(),
-            exit = shrinkVertically() + fadeOut()
-        ) {
-            LanguageTutorControlBar(
-                settings = uiState.settings,
-                isConnected = uiState.connectionState != ConnectionState.DISCONNECTED,
-                notebookEntries = uiState.tutorNotebook,
-                onUpdateTutorConfig = onUpdateTutorConfig,
-                onTriggerTutorQuickAction = onTriggerTutorQuickAction,
-                onDeleteNotebookEntry = onDeleteNotebookEntry,
-                onExportNotebookAnki = onExportNotebookAnki
-            )
-        }
-
-        // 3. Compact Status & Live Waveform Pill (always visible when chatting)
-        if (messages.isNotEmpty()) {
-            CompactVoiceOrbStatusCard(
-                uiState = uiState,
-                currentMode = currentMode
-            )
-        }
-
-        // 4. Main Centerpiece Area: Animated 3D Voice Orb (when empty) OR Glassmorphic Chat Stream
+        // 2. Main Centerpiece Area: Animated 3D Voice Orb (when empty) OR Clean Chat Stream (80%+ screen space!)
         if (messages.isEmpty()) {
             Box(
                 modifier = Modifier
@@ -503,7 +885,16 @@ private fun LiveConversationTab(
                         },
                         onOpenUrl = { url ->
                             runCatching {
-                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+                                    if (url.contains("google.com/maps") || url.contains("maps.app.goo.gl")) {
+                                        setPackage("com.google.android.apps.maps")
+                                    }
+                                }
+                                try {
+                                    context.startActivity(intent)
+                                } catch (_: Exception) {
+                                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                                }
                             }
                         },
                         onPlayVoiceClip = onPlayMessageVoiceClip,
@@ -513,7 +904,7 @@ private fun LiveConversationTab(
             }
         }
 
-        // 5. Floating Glassmorphic Bottom Control Dock
+        // 3. Single Clean Bottom Control Dock
         FloatingBottomControlDock(
             uiState = uiState,
             currentMode = currentMode,
@@ -536,144 +927,338 @@ private fun LiveConversationTab(
 }
 
 @Composable
-private fun ModeSegmentedSwitcher(
+private fun SlimContextualModeHeaderBar(
+    uiState: UiState,
     currentMode: AppMode,
-    onSelectAppMode: (AppMode) -> Unit
+    onOpenModeConfigSheet: () -> Unit,
+    onOpenNotebookDialog: () -> Unit,
+    onSelectTargetLanguage: (String) -> Unit,
+    onSelectSecondaryLanguage: (String) -> Unit,
+    onUpdateSettings: (AppSettings) -> Unit,
+    onTriggerTutorQuickAction: (String) -> Unit
 ) {
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 14.dp, vertical = 6.dp),
-        shape = RoundedCornerShape(50),
-        color = Color(0xFF131C2E).copy(alpha = 0.9f),
-        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f))
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(4.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            // Pill 1: AI Voice Assistant
-            val assistantSelected = currentMode == AppMode.ASSISTANT
-            Box(
+    val settings = uiState.settings
+    val isConnected = uiState.connectionState != ConnectionState.DISCONNECTED
+
+    when (currentMode) {
+        AppMode.ASSISTANT -> {
+            val chipScroll = rememberScrollState()
+            Row(
                 modifier = Modifier
-                    .weight(1f)
-                    .clip(RoundedCornerShape(50))
-                    .background(
-                        if (assistantSelected) {
-                            Brush.horizontalGradient(
-                                listOf(CyanAccent.copy(alpha = 0.25f), VioletAccent.copy(alpha = 0.25f))
-                            )
-                        } else {
-                            Brush.horizontalGradient(listOf(Color.Transparent, Color.Transparent))
-                        }
-                    )
-                    .border(
-                        width = if (assistantSelected) 1.dp else 0.dp,
-                        color = if (assistantSelected) CyanAccent.copy(alpha = 0.6f) else Color.Transparent,
-                        shape = RoundedCornerShape(50)
-                    )
-                    .clickable { onSelectAppMode(AppMode.ASSISTANT) }
-                    .padding(vertical = 9.dp),
-                contentAlignment = Alignment.Center
+                    .fillMaxWidth()
+                    .horizontalScroll(chipScroll)
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Default.AutoAwesome,
-                        contentDescription = null,
-                        tint = if (assistantSelected) CyanAccent else Color(0xFF94A3B8),
-                        modifier = Modifier.size(15.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
+                // Model & Mode Config Pill
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = Color(0xFF161F30),
+                    border = BorderStroke(0.5.dp, CyanAccent.copy(alpha = 0.45f)),
+                    modifier = Modifier.clickable { onOpenModeConfigSheet() }
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "🎙️ ${settings.frontendVoiceModel} ⇄ ${settings.backendBrainModel} ▾",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFFE2E8F0)
+                        )
+                    }
+                }
+
+                // GPS & Google Maps Tool Quick Toggle Chip
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = if (settings.locationToolsEnabled) EmeraldAccent.copy(alpha = 0.18f) else Color(0xFF161F30),
+                    border = BorderStroke(
+                        0.5.dp,
+                        if (settings.locationToolsEnabled) EmeraldAccent.copy(alpha = 0.6f) else Color.White.copy(alpha = 0.12f)
+                    ),
+                    modifier = Modifier.clickable {
+                        onUpdateSettings(settings.copy(locationToolsEnabled = !settings.locationToolsEnabled))
+                    }
+                ) {
                     Text(
-                        text = "語音助理",
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = if (assistantSelected) FontWeight.Bold else FontWeight.Medium,
-                        color = if (assistantSelected) Color.White else Color(0xFF94A3B8)
+                        text = if (settings.locationToolsEnabled) "📍 定位＆導航: 開" else "📍 定位＆導航: 關",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (settings.locationToolsEnabled) EmeraldAccent else Color(0xFF94A3B8),
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                    )
+                }
+
+                // Linkup Web Search Quick Toggle Chip
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = if (settings.linkupSearchEnabled) CyanAccent.copy(alpha = 0.16f) else Color(0xFF161F30),
+                    border = BorderStroke(
+                        0.5.dp,
+                        if (settings.linkupSearchEnabled) CyanAccent.copy(alpha = 0.55f) else Color.White.copy(alpha = 0.12f)
+                    ),
+                    modifier = Modifier.clickable {
+                        onUpdateSettings(settings.copy(linkupSearchEnabled = !settings.linkupSearchEnabled))
+                    }
+                ) {
+                    Text(
+                        text = if (settings.linkupSearchEnabled) "🌐 Linkup 搜尋: 開" else "🌐 Linkup: 關",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (settings.linkupSearchEnabled) CyanAccent else Color(0xFF94A3B8),
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                    )
+                }
+
+                // Calendar Quick Toggle Chip
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = if (settings.calendarToolsEnabled) VioletAccent.copy(alpha = 0.18f) else Color(0xFF161F30),
+                    border = BorderStroke(
+                        0.5.dp,
+                        if (settings.calendarToolsEnabled) VioletAccent.copy(alpha = 0.55f) else Color.White.copy(alpha = 0.12f)
+                    ),
+                    modifier = Modifier.clickable {
+                        onUpdateSettings(settings.copy(calendarToolsEnabled = !settings.calendarToolsEnabled))
+                    }
+                ) {
+                    Text(
+                        text = if (settings.calendarToolsEnabled) "📅 行事曆: 開" else "📅 行事曆: 關",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (settings.calendarToolsEnabled) Color(0xFFE9D5FF) else Color(0xFF94A3B8),
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
                     )
                 }
             }
+        }
 
-            // Pill 2: Live Translation (`gpt-realtime-translate`)
-            val translateSelected = currentMode == AppMode.TRANSLATE
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .clip(RoundedCornerShape(50))
-                    .background(
-                        if (translateSelected) {
-                            Brush.horizontalGradient(
-                                listOf(EmeraldAccent.copy(alpha = 0.28f), CyanAccent.copy(alpha = 0.22f))
-                            )
-                        } else {
-                            Brush.horizontalGradient(listOf(Color.Transparent, Color.Transparent))
-                        }
-                    )
-                    .border(
-                        width = if (translateSelected) 1.dp else 0.dp,
-                        color = if (translateSelected) EmeraldAccent.copy(alpha = 0.65f) else Color.Transparent,
-                        shape = RoundedCornerShape(50)
-                    )
-                    .clickable { onSelectAppMode(AppMode.TRANSLATE) }
-                    .padding(vertical = 9.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Default.Translate,
-                        contentDescription = null,
-                        tint = if (translateSelected) EmeraldAccent else Color(0xFF94A3B8),
-                        modifier = Modifier.size(15.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = "同步口譯",
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = if (translateSelected) FontWeight.Bold else FontWeight.Medium,
-                        color = if (translateSelected) Color.White else Color(0xFF94A3B8)
-                    )
+        AppMode.TRANSLATE -> {
+            // Compact 1-row Fixed Dual-Language Quick Toggle (Slot A ⇄ Slot B) + [⚙️ 13國/詞庫 ▾]
+            val targetLang = settings.translationTargetLanguage
+            val secondaryLang = settings.translationSecondaryLanguage
+            var slotALang by remember { mutableStateOf(targetLang.ifBlank { "zh" }) }
+            var slotBLang by remember {
+                mutableStateOf(
+                    if (secondaryLang.isNotBlank() && secondaryLang != slotALang) secondaryLang
+                    else if (slotALang == "zh") "ja" else "zh"
+                )
+            }
+            LaunchedEffect(targetLang) {
+                if (targetLang != slotALang && targetLang != slotBLang) {
+                    slotBLang = targetLang
+                    onSelectSecondaryLanguage(targetLang)
                 }
             }
 
-            // Pill 3: AI Language Tutor (`🎓 外語陪練`)
-            val tutorSelected = currentMode == AppMode.TUTOR
-            Box(
+            val isSlotAActive = targetLang == slotALang
+            val isSlotBActive = targetLang == slotBLang
+            val slotALabel = AppSettings.languageLabel(slotALang).substringBefore(" (")
+            val slotBLabel = AppSettings.languageLabel(slotBLang).substringBefore(" (")
+
+            Row(
                 modifier = Modifier
-                    .weight(1f)
-                    .clip(RoundedCornerShape(50))
-                    .background(
-                        if (tutorSelected) {
-                            Brush.horizontalGradient(
-                                listOf(AmberTutorAccent.copy(alpha = 0.30f), VioletAccent.copy(alpha = 0.25f))
-                            )
-                        } else {
-                            Brush.horizontalGradient(listOf(Color.Transparent, Color.Transparent))
-                        }
-                    )
-                    .border(
-                        width = if (tutorSelected) 1.dp else 0.dp,
-                        color = if (tutorSelected) AmberTutorAccent.copy(alpha = 0.70f) else Color.Transparent,
-                        shape = RoundedCornerShape(50)
-                    )
-                    .clickable { onSelectAppMode(AppMode.TUTOR) }
-                    .padding(vertical = 9.dp),
-                contentAlignment = Alignment.Center
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Default.School,
-                        contentDescription = null,
-                        tint = if (tutorSelected) AmberTutorAccent else Color(0xFF94A3B8),
-                        modifier = Modifier.size(15.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
+                // Slot A Fixed Button
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = if (isSlotAActive) EmeraldAccent.copy(alpha = 0.22f) else Color(0xFF161F30),
+                    border = BorderStroke(
+                        width = if (isSlotAActive) 1.dp else 0.5.dp,
+                        color = if (isSlotAActive) EmeraldAccent else Color.White.copy(alpha = 0.12f)
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable {
+                            onSelectTargetLanguage(slotALang)
+                            onSelectSecondaryLanguage(slotBLang)
+                        }
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Text(
+                            text = if (isSlotAActive) "🔊 翻成 $slotALabel" else "輸出 1: $slotALabel",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = if (isSlotAActive) FontWeight.ExtraBold else FontWeight.Medium,
+                            color = if (isSlotAActive) Color.White else Color(0xFF94A3B8),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+
+                // Slot B Fixed Button
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = if (isSlotBActive) EmeraldAccent.copy(alpha = 0.22f) else Color(0xFF161F30),
+                    border = BorderStroke(
+                        width = if (isSlotBActive) 1.dp else 0.5.dp,
+                        color = if (isSlotBActive) EmeraldAccent else Color.White.copy(alpha = 0.12f)
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable {
+                            onSelectTargetLanguage(slotBLang)
+                            onSelectSecondaryLanguage(slotALang)
+                        }
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Text(
+                            text = if (isSlotBActive) "🔊 翻成 $slotBLabel" else "輸出 2: $slotBLabel",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = if (isSlotBActive) FontWeight.ExtraBold else FontWeight.Medium,
+                            color = if (isSlotBActive) Color.White else Color(0xFF94A3B8),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+
+                // Open 13-Language & Glossary BottomSheet
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color(0xFF161F30),
+                    border = BorderStroke(0.5.dp, CyanAccent.copy(alpha = 0.45f)),
+                    modifier = Modifier.clickable { onOpenModeConfigSheet() }
+                ) {
                     Text(
-                        text = "外語陪練",
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = if (tutorSelected) FontWeight.Bold else FontWeight.Medium,
-                        color = if (tutorSelected) Color.White else Color(0xFF94A3B8)
+                        text = "⚙️ 13國/詞庫 ▾",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = CyanAccent,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)
                     )
+                }
+            }
+        }
+
+        AppMode.TUTOR -> {
+            val langShort = AppSettings.tutorLanguageLabel(settings.tutorTargetLanguage).substringBefore(" (")
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                // Row 1: Compact Summary Pill (opens BottomSheet) + Notebook Button + Auto-Coach Toggle
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = AmberTutorAccent.copy(alpha = 0.16f),
+                        border = BorderStroke(0.5.dp, AmberTutorAccent.copy(alpha = 0.6f)),
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable { onOpenModeConfigSheet() }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "$langShort · ${settings.tutorLevel.shortLabel} · ${settings.tutorScenario.shortLabel} ▾",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFFDE68A),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = Color(0xFF161F30),
+                        border = BorderStroke(0.5.dp, VioletAccent.copy(alpha = 0.5f)),
+                        modifier = Modifier.clickable { onOpenNotebookDialog() }
+                    ) {
+                        Text(
+                            text = "📒 複習本 (${uiState.tutorNotebook.size})",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFFE9D5FF),
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                        )
+                    }
+                }
+
+                // Row 2 (Only when in active call): 1-Tap Live Tutor Helper Actions
+                if (isConnected) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Surface(
+                            shape = RoundedCornerShape(50),
+                            color = AmberTutorAccent.copy(alpha = 0.16f),
+                            border = BorderStroke(0.5.dp, AmberTutorAccent.copy(alpha = 0.45f)),
+                            modifier = Modifier
+                                .weight(1f)
+                                .clickable { onTriggerTutorQuickAction("start_scenario") }
+                        ) {
+                            Text(
+                                text = "🎬 AI 先開口",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFFDE68A),
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.padding(vertical = 5.dp)
+                            )
+                        }
+
+                        Surface(
+                            shape = RoundedCornerShape(50),
+                            color = CyanAccent.copy(alpha = 0.16f),
+                            border = BorderStroke(0.5.dp, CyanAccent.copy(alpha = 0.45f)),
+                            modifier = Modifier
+                                .weight(1f)
+                                .clickable { onTriggerTutorQuickAction("repeat_slowly") }
+                        ) {
+                            Text(
+                                text = "🐢 慢速再說一次",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFBAE6FD),
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.padding(vertical = 5.dp)
+                            )
+                        }
+
+                        Surface(
+                            shape = RoundedCornerShape(50),
+                            color = VioletAccent.copy(alpha = 0.18f),
+                            border = BorderStroke(0.5.dp, VioletAccent.copy(alpha = 0.45f)),
+                            modifier = Modifier
+                                .weight(1f)
+                                .clickable { onTriggerTutorQuickAction("give_hint") }
+                        ) {
+                            Text(
+                                text = "💡 提示我怎麼回",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFE9D5FF),
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.padding(vertical = 5.dp)
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -681,367 +1266,427 @@ private fun ModeSegmentedSwitcher(
 }
 
 @Composable
-private fun LanguageTutorControlBar(
-    settings: AppSettings,
-    isConnected: Boolean,
-    notebookEntries: List<TutorNotebookEntry>,
+private fun ModeConfigBottomSheetContent(
+    uiState: UiState,
+    currentMode: AppMode,
+    onSelectAppMode: (AppMode) -> Unit,
+    onUpdateSettings: (AppSettings) -> Unit,
     onUpdateTutorConfig: (AppSettings, Boolean) -> Unit,
-    onTriggerTutorQuickAction: (String) -> Unit,
-    onDeleteNotebookEntry: (String) -> Unit,
-    onExportNotebookAnki: () -> String
+    onSelectTargetLanguage: (String) -> Unit,
+    onSelectSecondaryLanguage: (String) -> Unit,
+    onOpenNotebook: () -> Unit,
+    onOpenFullSettings: () -> Unit,
+    onDismiss: () -> Unit
 ) {
-    val context = LocalContext.current
-    val langScroll = rememberScrollState()
-    val scenarioScroll = rememberScrollState()
-    var showCustomScenarioDialog by remember { mutableStateOf(false) }
-    var showNotebookDialog by remember { mutableStateOf(false) }
+    val settings = uiState.settings
+    var showGlossaryDialog by remember { mutableStateOf(false) }
 
-    Surface(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 14.dp, vertical = 4.dp),
-        shape = RoundedCornerShape(18.dp),
-        color = Color(0xFF1A172B).copy(alpha = 0.94f),
-        border = BorderStroke(1.dp, AmberTutorAccent.copy(alpha = 0.42f))
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 18.dp, vertical = 8.dp)
+            .padding(bottom = 28.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
-            // 1. Header + Auto-Coach Toggle Pill + Notebook Pill
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
+        // Top Mode Segmented Switcher inside the BottomSheet
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            listOf(
+                Triple(AppMode.ASSISTANT, "🎙️ 語音助理", CyanAccent),
+                Triple(AppMode.TRANSLATE, "🌐 同步口譯", EmeraldAccent),
+                Triple(AppMode.TUTOR, "🎓 外語陪練", AmberTutorAccent)
+            ).forEach { (mode, label, accent) ->
+                val selected = currentMode == mode
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = if (selected) accent.copy(alpha = 0.22f) else Color(0xFF161F30),
+                    border = BorderStroke(1.dp, if (selected) accent else Color.White.copy(alpha = 0.08f)),
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable { onSelectAppMode(mode) }
+                ) {
                     Text(
-                        text = "🎓 雙腦外語口說家教 (支援中日/中英混講卡詞救星)",
+                        text = label,
                         style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                        color = if (selected) Color.White else Color(0xFF94A3B8),
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(vertical = 9.dp)
                     )
-                    Text(
-                        text = "不會講的單字直接夾雜中文說！點擊氣泡可 0.75x 慢速跟讀與收錄複習本",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Color(0xFFCBD5E1)
-                    )
-                }
-
-                Spacer(modifier = Modifier.width(6.dp))
-
-                // Notebook Button
-                Surface(
-                    shape = RoundedCornerShape(50),
-                    color = if (notebookEntries.isNotEmpty()) VioletAccent.copy(alpha = 0.25f) else Color(0xFF1E293B),
-                    border = BorderStroke(
-                        1.dp,
-                        if (notebookEntries.isNotEmpty()) VioletAccent else Color.White.copy(alpha = 0.15f)
-                    ),
-                    modifier = Modifier.clickable { showNotebookDialog = true }
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "📒 複習本 (${notebookEntries.size})",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = if (notebookEntries.isNotEmpty()) Color(0xFFE9D5FF) else Color(0xFFCBD5E1)
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.width(6.dp))
-
-                Surface(
-                    shape = RoundedCornerShape(50),
-                    color = if (settings.tutorAutoCoachEnabled) AmberTutorAccent.copy(alpha = 0.22f) else Color(0xFF1E293B),
-                    border = BorderStroke(
-                        1.dp,
-                        if (settings.tutorAutoCoachEnabled) AmberTutorAccent else Color.White.copy(alpha = 0.15f)
-                    ),
-                    modifier = Modifier.clickable {
-                        onUpdateTutorConfig(
-                            settings.copy(tutorAutoCoachEnabled = !settings.tutorAutoCoachEnabled),
-                            false
-                        )
-                    }
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = if (settings.tutorAutoCoachEnabled) "📖 解析: 開" else "📖 解析: 關",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = if (settings.tutorAutoCoachEnabled) Color(0xFFFDE68A) else Color(0xFF94A3B8)
-                        )
-                    }
                 }
             }
+        }
 
-            Spacer(modifier = Modifier.height(8.dp))
+        HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
 
-            // 2. Target Learning Language Horizontal Chips
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(langScroll),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                AppSettings.AVAILABLE_TUTOR_LANGUAGES.forEach { (code, label) ->
-                    val selected = settings.tutorTargetLanguage == code
-                    val shortName = label.substringBefore(" (")
-                    Surface(
-                        shape = RoundedCornerShape(50),
-                        color = if (selected) AmberTutorAccent.copy(alpha = 0.25f) else Color(0xFF141E30),
-                        border = BorderStroke(
-                            1.dp,
-                            if (selected) AmberTutorAccent else Color.White.copy(alpha = 0.08f)
-                        ),
-                        modifier = Modifier.clickable {
-                            if (!selected) {
-                                onUpdateTutorConfig(settings.copy(tutorTargetLanguage = code), true)
-                            }
+        when (currentMode) {
+            AppMode.ASSISTANT -> {
+                Text(
+                    text = "🎙️ 語音助理工具與模型快速設定",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White
+                )
+
+                // GPS + Google Maps + Linkup Nearby Switch
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = Color(0xFF161F30),
+                    border = BorderStroke(0.5.dp, EmeraldAccent.copy(alpha = 0.4f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "📍 手機 GPS 定位 ＋ 周邊搜尋 ＋ Google Maps 導航",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                            Text(
+                                text = "支援詢問「我在哪裡」、「找附近拉麵店」或「幫我開 Google Maps 導航去某地」",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFF94A3B8)
+                            )
                         }
-                    ) {
-                        Text(
-                            text = shortName,
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                            color = if (selected) Color.White else Color(0xFF94A3B8),
-                            modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp)
+                        Switch(
+                            checked = settings.locationToolsEnabled,
+                            onCheckedChange = { onUpdateSettings(settings.copy(locationToolsEnabled = it)) }
                         )
                     }
                 }
+
+                // Linkup Web Search Switch
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = Color(0xFF161F30),
+                    border = BorderStroke(0.5.dp, Color.White.copy(alpha = 0.1f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "🌐 Linkup 即時網路搜尋",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                            Text(
+                                text = "查詢最新新聞、營業時間、店家評價與即時資訊",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFF94A3B8)
+                            )
+                        }
+                        Switch(
+                            checked = settings.linkupSearchEnabled,
+                            onCheckedChange = { onUpdateSettings(settings.copy(linkupSearchEnabled = it)) }
+                        )
+                    }
+                }
+
+                // Android Calendar Switch
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = Color(0xFF161F30),
+                    border = BorderStroke(0.5.dp, Color.White.copy(alpha = 0.1f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "📅 Android 手機行事曆讀寫",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                            Text(
+                                text = "查詢行程、新增活動並可搭配 Google Maps 導航至下一個行程地點",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFF94A3B8)
+                            )
+                        }
+                        Switch(
+                            checked = settings.calendarToolsEnabled,
+                            onCheckedChange = { onUpdateSettings(settings.copy(calendarToolsEnabled = it)) }
+                        )
+                    }
+                }
+
+                OutlinedButton(
+                    onClick = onOpenFullSettings,
+                    border = BorderStroke(1.dp, CyanAccent.copy(alpha = 0.5f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Default.Settings, contentDescription = null, tint = CyanAccent, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("開啟完整模型與 API 金鑰設定", color = CyanAccent, fontWeight = FontWeight.Bold)
+                }
             }
 
-            Spacer(modifier = Modifier.height(6.dp))
+            AppMode.TRANSLATE -> {
+                Text(
+                    text = "🌐 選擇同步口譯輸出語言 (13 國語言)",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White
+                )
+                Text(
+                    text = "說話端自動偵測 70+ 種語言；點選下方語言即可切換手機播出的目標語言：",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFF94A3B8)
+                )
 
-            // 3. Proficiency Level Selector (Beginner N5-N4 / Intermediate N3-N2 / Advanced N1)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                TutorLevel.entries.forEach { level ->
-                    val selected = settings.tutorLevel == level
-                    Surface(
-                        shape = RoundedCornerShape(10.dp),
-                        color = if (selected) VioletAccent.copy(alpha = 0.25f) else Color(0xFF141E30),
-                        border = BorderStroke(
-                            1.dp,
-                            if (selected) VioletAccent else Color.White.copy(alpha = 0.08f)
-                        ),
-                        modifier = Modifier
-                            .weight(1f)
-                            .clickable {
-                                if (!selected) {
-                                    onUpdateTutorConfig(settings.copy(tutorLevel = level), false)
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    AppSettings.AVAILABLE_TRANSLATION_LANGUAGES.chunked(2).forEach { rowItems ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            rowItems.forEach { (code, fullLabel) ->
+                                val selected = settings.translationTargetLanguage == code
+                                Surface(
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = if (selected) EmeraldAccent.copy(alpha = 0.22f) else Color(0xFF161F30),
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (selected) EmeraldAccent else Color.White.copy(alpha = 0.08f)
+                                    ),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clickable { onSelectTargetLanguage(code) }
+                                ) {
+                                    Text(
+                                        text = fullLabel,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                        color = if (selected) Color.White else Color(0xFFCBD5E1),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 9.dp)
+                                    )
                                 }
                             }
-                    ) {
-                        Text(
-                            text = level.shortLabel,
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                            color = if (selected) Color(0xFFF3E8FF) else Color(0xFF94A3B8),
-                            textAlign = TextAlign.Center,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 6.dp)
-                        )
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(6.dp))
-
-            // 4. Roleplay Scenario Selector Chips
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(scenarioScroll),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                TutorScenario.entries.forEach { scenario ->
-                    val selected = settings.tutorScenario == scenario
-                    Surface(
-                        shape = RoundedCornerShape(10.dp),
-                        color = if (selected) CyanAccent.copy(alpha = 0.22f) else Color(0xFF141E30),
-                        border = BorderStroke(
-                            1.dp,
-                            if (selected) CyanAccent else Color.White.copy(alpha = 0.08f)
-                        ),
-                        modifier = Modifier.clickable {
-                            if (scenario == TutorScenario.CUSTOM) {
-                                showCustomScenarioDialog = true
-                            } else {
-                                onUpdateTutorConfig(settings.copy(tutorScenario = scenario), true)
+                            if (rowItems.size == 1) {
+                                Spacer(modifier = Modifier.weight(1f))
                             }
                         }
-                    ) {
-                        Text(
-                            text = if (scenario == TutorScenario.CUSTOM && settings.tutorCustomScenarioPrompt.isNotBlank()) {
-                                "✨ 自訂: ${settings.tutorCustomScenarioPrompt.take(8)}..."
-                            } else {
-                                scenario.shortLabel
-                            },
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                            color = if (selected) Color.White else Color(0xFFCBD5E1),
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
-                        )
                     }
+                }
+
+                Button(
+                    onClick = { showGlossaryDialog = true },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = VioletAccent,
+                        contentColor = Color.White
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("編輯專屬詞彙庫 ＆ 口譯領域 Prompt", fontWeight = FontWeight.Bold)
                 }
             }
 
-            // 5. Live In-Call Helper Buttons (only visible while connected in Tutor mode)
-            if (isConnected) {
-                Spacer(modifier = Modifier.height(8.dp))
-                HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
-                Spacer(modifier = Modifier.height(6.dp))
+            AppMode.TUTOR -> {
+                Text(
+                    text = "🎓 外語口說陪練設定",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White
+                )
+
+                // 1. Target Language Grid
+                Text(
+                    text = "1. 選擇練習語言：",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = AmberTutorAccent,
+                    fontWeight = FontWeight.Bold
+                )
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    AppSettings.AVAILABLE_TUTOR_LANGUAGES.chunked(2).forEach { rowLangs ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            rowLangs.forEach { (code, label) ->
+                                val selected = settings.tutorTargetLanguage == code
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = if (selected) AmberTutorAccent.copy(alpha = 0.22f) else Color(0xFF161F30),
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (selected) AmberTutorAccent else Color.White.copy(alpha = 0.08f)
+                                    ),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clickable {
+                                            onUpdateTutorConfig(settings.copy(tutorTargetLanguage = code), true)
+                                        }
+                                ) {
+                                    Text(
+                                        text = label.substringBefore(" ("),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                        color = if (selected) Color.White else Color(0xFFCBD5E1),
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 2. Proficiency Level
+                Text(
+                    text = "2. 選擇程度等級：",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = VioletAccent,
+                    fontWeight = FontWeight.Bold
+                )
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Surface(
-                        shape = RoundedCornerShape(50),
-                        color = AmberTutorAccent.copy(alpha = 0.18f),
-                        border = BorderStroke(1.dp, AmberTutorAccent.copy(alpha = 0.45f)),
-                        modifier = Modifier
-                            .weight(1f)
-                            .clickable { onTriggerTutorQuickAction("start_scenario") }
-                    ) {
-                        Text(
-                            text = "🎬 AI 先開口",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFFFDE68A),
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.padding(vertical = 6.dp)
-                        )
-                    }
-
-                    Surface(
-                        shape = RoundedCornerShape(50),
-                        color = CyanAccent.copy(alpha = 0.18f),
-                        border = BorderStroke(1.dp, CyanAccent.copy(alpha = 0.45f)),
-                        modifier = Modifier
-                            .weight(1f)
-                            .clickable { onTriggerTutorQuickAction("repeat_slowly") }
-                    ) {
-                        Text(
-                            text = "🐢 慢速再說一次",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFFBAE6FD),
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.padding(vertical = 6.dp)
-                        )
-                    }
-
-                    Surface(
-                        shape = RoundedCornerShape(50),
-                        color = VioletAccent.copy(alpha = 0.20f),
-                        border = BorderStroke(1.dp, VioletAccent.copy(alpha = 0.45f)),
-                        modifier = Modifier
-                            .weight(1f)
-                            .clickable { onTriggerTutorQuickAction("give_hint") }
-                    ) {
-                        Text(
-                            text = "💡 提示我怎麼回",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFFE9D5FF),
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.padding(vertical = 6.dp)
-                        )
+                    TutorLevel.entries.forEach { level ->
+                        val selected = settings.tutorLevel == level
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = if (selected) VioletAccent.copy(alpha = 0.25f) else Color(0xFF161F30),
+                            border = BorderStroke(
+                                1.dp,
+                                if (selected) VioletAccent else Color.White.copy(alpha = 0.08f)
+                            ),
+                            modifier = Modifier
+                                .weight(1f)
+                                .clickable {
+                                    onUpdateTutorConfig(settings.copy(tutorLevel = level), false)
+                                }
+                        ) {
+                            Text(
+                                text = level.shortLabel,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                color = if (selected) Color.White else Color(0xFFCBD5E1),
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 8.dp)
+                            )
+                        }
                     }
                 }
-            }
-        }
-    }
 
-    if (showCustomScenarioDialog) {
-        var customDraft by remember(settings.tutorCustomScenarioPrompt) {
-            mutableStateOf(settings.tutorCustomScenarioPrompt)
-        }
-        AlertDialog(
-            onDismissRequest = { showCustomScenarioDialog = false },
-            containerColor = Color(0xFF111827),
-            titleContentColor = Color.White,
-            textContentColor = Color(0xFFCBD5E1),
-            title = {
-                Text("✨ 自訂外語口說演練情境", fontWeight = FontWeight.Bold)
-            },
-            text = {
-                Column {
-                    Text(
-                        "請輸入你想讓 AI 扮演的角色與對話場景（例如：「你是日本藥妝店員，我要找止痛藥跟問退稅」、「你是日本房東，我要詢問租屋細節」）：",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xFF94A3B8)
-                    )
-                    Spacer(modifier = Modifier.height(10.dp))
+                // 3. Roleplay Scenario
+                Text(
+                    text = "3. 選擇實戰對話情境：",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = CyanAccent,
+                    fontWeight = FontWeight.Bold
+                )
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    TutorScenario.entries.chunked(2).forEach { rowScenarios ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            rowScenarios.forEach { scenario ->
+                                val selected = settings.tutorScenario == scenario
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = if (selected) CyanAccent.copy(alpha = 0.22f) else Color(0xFF161F30),
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (selected) CyanAccent else Color.White.copy(alpha = 0.08f)
+                                    ),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clickable {
+                                            onUpdateTutorConfig(settings.copy(tutorScenario = scenario), true)
+                                        }
+                                ) {
+                                    Text(
+                                        text = scenario.shortLabel,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                        color = if (selected) Color.White else Color(0xFFCBD5E1),
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)
+                                    )
+                                }
+                            }
+                            if (rowScenarios.size == 1) {
+                                Spacer(modifier = Modifier.weight(1f))
+                            }
+                        }
+                    }
+                }
+
+                if (settings.tutorScenario == TutorScenario.CUSTOM) {
                     OutlinedTextField(
-                        value = customDraft,
-                        onValueChange = { customDraft = it },
-                        placeholder = { Text("輸入自訂角色與情境...", color = Color(0xFF64748B)) },
-                        minLines = 3,
-                        maxLines = 5,
+                        value = settings.tutorCustomScenarioPrompt,
+                        onValueChange = {
+                            onUpdateTutorConfig(settings.copy(tutorCustomScenarioPrompt = it), false)
+                        },
+                        label = { Text("✨ 自訂角色與情境描述") },
+                        placeholder = { Text("例如：你是日本藥妝店員，我要詢問止痛藥與退稅...") },
+                        minLines = 2,
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        onUpdateTutorConfig(
-                            settings.copy(
-                                tutorScenario = TutorScenario.CUSTOM,
-                                tutorCustomScenarioPrompt = customDraft.trim()
-                            ),
-                            true
-                        )
-                        showCustomScenarioDialog = false
-                    },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = AmberTutorAccent,
-                        contentColor = Color(0xFF06101E)
-                    )
+
+                // 4. Auto-Coach Notes Toggle
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color(0xFF161F30),
+                    border = BorderStroke(0.5.dp, Color.White.copy(alpha = 0.1f)),
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("套用並開始情境", fontWeight = FontWeight.Bold)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showCustomScenarioDialog = false }) {
-                    Text("取消", color = Color(0xFF94A3B8))
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "📖 每回合自動附上漢字假名標音、中譯與口說糾錯",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                        }
+                        Switch(
+                            checked = settings.tutorAutoCoachEnabled,
+                            onCheckedChange = {
+                                onUpdateTutorConfig(settings.copy(tutorAutoCoachEnabled = it), false)
+                            }
+                        )
+                    }
                 }
             }
-        )
+        }
     }
 
-    if (showNotebookDialog) {
-        TutorNotebookDialog(
+    if (showGlossaryDialog) {
+        CustomGlossaryAndPromptDialog(
             settings = settings,
-            entries = notebookEntries,
-            onDismiss = { showNotebookDialog = false },
-            onToggleInjectWeaknesses = { enabled ->
-                onUpdateTutorConfig(settings.copy(tutorInjectNotebookWeaknesses = enabled), false)
-            },
-            onDeleteEntry = onDeleteNotebookEntry,
-            onExportAnki = {
-                val tsv = onExportNotebookAnki()
-                if (tsv.isBlank()) {
-                    Toast.makeText(context, "複習本目前是空的", Toast.LENGTH_SHORT).show()
-                } else {
-                    copyToClipboard(context, "Anki Flashcards TSV", tsv)
-                    Toast.makeText(context, "已複製 ${notebookEntries.size} 筆 Anki 字卡 (TSV 格式) 到剪貼簿！", Toast.LENGTH_LONG).show()
-                }
-            },
-            onCopyItem = { text ->
-                copyToClipboard(context, "Notebook Item", text)
-                Toast.makeText(context, "已複製句子與解析", Toast.LENGTH_SHORT).show()
+            onDismiss = { showGlossaryDialog = false },
+            onSave = { newGlossary, newContextPrompt, usePromptInterpreter ->
+                onUpdateSettings(
+                    settings.copy(
+                        customGlossaryTerms = newGlossary,
+                        translationContextPrompt = newContextPrompt,
+                        usePromptAwareInterpreter = usePromptInterpreter
+                    )
+                )
+                showGlossaryDialog = false
             }
         )
     }
@@ -1091,7 +1736,6 @@ private fun TutorNotebookDialog(
                     .heightIn(max = 460.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                // Auto-inject weaknesses switch card
                 Surface(
                     shape = RoundedCornerShape(12.dp),
                     color = if (settings.tutorInjectNotebookWeaknesses) AmberTutorAccent.copy(alpha = 0.16f) else Color(0xFF1E293B),
@@ -1243,369 +1887,6 @@ private fun TutorNotebookDialog(
             }
         }
     )
-}
-
-@Composable
-private fun TranslationLanguageControlBar(
-    settings: AppSettings,
-    onSelectTargetLanguage: (String) -> Unit,
-    onSelectSecondaryLanguage: (String) -> Unit,
-    onUpdateSettings: (AppSettings) -> Unit
-) {
-    val targetLang = settings.translationTargetLanguage
-    val secondaryLang = settings.translationSecondaryLanguage
-
-    // Keep two fixed-position quick slots (Slot A on the left, Slot B on the right) so buttons NEVER jump around!
-    var slotALang by remember {
-        mutableStateOf(if (targetLang.isNotBlank()) targetLang else "zh")
-    }
-    var slotBLang by remember {
-        mutableStateOf(
-            if (secondaryLang.isNotBlank() && secondaryLang != slotALang) secondaryLang
-            else if (slotALang == "zh") "ja" else "zh"
-        )
-    }
-
-    // If user selected a 3rd language from the 13-language bar, update whichever slot wasn't Chinese (or Slot B)
-    LaunchedEffect(targetLang) {
-        if (targetLang != slotALang && targetLang != slotBLang) {
-            slotBLang = targetLang
-            onSelectSecondaryLanguage(targetLang)
-        }
-    }
-
-    var showSlotAMenu by remember { mutableStateOf(false) }
-    var showSlotBMenu by remember { mutableStateOf(false) }
-    var showAll13Langs by remember { mutableStateOf(false) }
-    var showGlossaryDialog by remember { mutableStateOf(false) }
-
-    val chipScroll = rememberScrollState()
-    val hasCustomGlossaryOrPrompt =
-        settings.customGlossaryTerms.isNotBlank() ||
-                settings.translationContextPrompt.isNotBlank() ||
-                settings.usePromptAwareInterpreter
-
-    val activeOutputShort = AppSettings.languageLabel(targetLang).substringBefore(" (")
-
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 14.dp, vertical = 4.dp),
-        shape = RoundedCornerShape(18.dp),
-        color = Color(0xFF0F222D).copy(alpha = 0.92f),
-        border = BorderStroke(1.dp, EmeraldAccent.copy(alpha = 0.4f))
-    ) {
-        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
-            // 1. Top Row: Clear explanation that INPUT language is ALWAYS auto-detected + Glossary/Prompt Button
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = "🎙️ 說話語言：不限 (自動聽懂 70+ 國語言)",
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White
-                        )
-                    }
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = "無須設定輸入語言！下方只需點選「手機要翻成哪國話播出來」",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Color(0xFF94A3B8)
-                    )
-                }
-
-                // Custom Glossary & Prompt Button
-                Surface(
-                    shape = RoundedCornerShape(50),
-                    color = if (hasCustomGlossaryOrPrompt) VioletAccent.copy(alpha = 0.25f) else Color(0xFF1E293B),
-                    border = BorderStroke(
-                        1.dp,
-                        if (hasCustomGlossaryOrPrompt) VioletAccent else Color.White.copy(alpha = 0.18f)
-                    ),
-                    modifier = Modifier.clickable { showGlossaryDialog = true }
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.AutoAwesome,
-                            contentDescription = "專屬詞庫與提示詞",
-                            tint = if (hasCustomGlossaryOrPrompt) Color(0xFFD8B4FE) else CyanAccent,
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(
-                            text = if (hasCustomGlossaryOrPrompt) "詞庫/Prompt (已啟用)" else "詞庫 / Prompt",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White
-                        )
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // 2. Middle Row: Two Fixed-Position Output Target Buttons (Slot A & Slot B never swap places!)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                // Fixed Slot A (Left Button)
-                val isSlotAActive = targetLang == slotALang
-                val slotALabel = AppSettings.languageLabel(slotALang).substringBefore(" (")
-                Box(modifier = Modifier.weight(1f)) {
-                    Surface(
-                        shape = RoundedCornerShape(14.dp),
-                        color = if (isSlotAActive) EmeraldAccent.copy(alpha = 0.22f) else Color(0xFF162235),
-                        border = BorderStroke(
-                            width = if (isSlotAActive) 1.5.dp else 1.dp,
-                            color = if (isSlotAActive) EmeraldAccent else Color.White.copy(alpha = 0.1f)
-                        ),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable {
-                                onSelectTargetLanguage(slotALang)
-                                onSelectSecondaryLanguage(slotBLang)
-                            }
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = if (isSlotAActive) "🔊 正在翻成此語言" else "點擊切換輸出 1",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = if (isSlotAActive) EmeraldAccent else Color(0xFF94A3B8),
-                                    fontWeight = if (isSlotAActive) FontWeight.Bold else FontWeight.Normal
-                                )
-                                Text(
-                                    text = slotALabel,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = Color.White,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                            Surface(
-                                shape = RoundedCornerShape(8.dp),
-                                color = Color.White.copy(alpha = 0.08f),
-                                modifier = Modifier.clickable { showSlotAMenu = true }
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = "換語言",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = Color(0xFFCBD5E1)
-                                    )
-                                    Icon(
-                                        imageVector = Icons.Default.ArrowDropDown,
-                                        contentDescription = "更換常用語言 1",
-                                        tint = Color(0xFFCBD5E1),
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    DropdownMenu(
-                        expanded = showSlotAMenu,
-                        onDismissRequest = { showSlotAMenu = false }
-                    ) {
-                        AppSettings.AVAILABLE_TRANSLATION_LANGUAGES.forEach { (code, fullLabel) ->
-                            DropdownMenuItem(
-                                text = { Text(fullLabel) },
-                                onClick = {
-                                    slotALang = code
-                                    onSelectTargetLanguage(code)
-                                    showSlotAMenu = false
-                                }
-                            )
-                        }
-                    }
-                }
-
-                // Fixed Slot B (Right Button)
-                val isSlotBActive = targetLang == slotBLang
-                val slotBLabel = AppSettings.languageLabel(slotBLang).substringBefore(" (")
-                Box(modifier = Modifier.weight(1f)) {
-                    Surface(
-                        shape = RoundedCornerShape(14.dp),
-                        color = if (isSlotBActive) EmeraldAccent.copy(alpha = 0.22f) else Color(0xFF162235),
-                        border = BorderStroke(
-                            width = if (isSlotBActive) 1.5.dp else 1.dp,
-                            color = if (isSlotBActive) EmeraldAccent else Color.White.copy(alpha = 0.1f)
-                        ),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable {
-                                onSelectTargetLanguage(slotBLang)
-                                onSelectSecondaryLanguage(slotALang)
-                            }
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = if (isSlotBActive) "🔊 正在翻成此語言" else "點擊切換輸出 2",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = if (isSlotBActive) EmeraldAccent else Color(0xFF94A3B8),
-                                    fontWeight = if (isSlotBActive) FontWeight.Bold else FontWeight.Normal
-                                )
-                                Text(
-                                    text = slotBLabel,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = Color.White,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                            Surface(
-                                shape = RoundedCornerShape(8.dp),
-                                color = Color.White.copy(alpha = 0.08f),
-                                modifier = Modifier.clickable { showSlotBMenu = true }
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = "換語言",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = Color(0xFFCBD5E1)
-                                    )
-                                    Icon(
-                                        imageVector = Icons.Default.ArrowDropDown,
-                                        contentDescription = "更換常用語言 2",
-                                        tint = Color(0xFFCBD5E1),
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    DropdownMenu(
-                        expanded = showSlotBMenu,
-                        onDismissRequest = { showSlotBMenu = false }
-                    ) {
-                        AppSettings.AVAILABLE_TRANSLATION_LANGUAGES.forEach { (code, fullLabel) ->
-                            DropdownMenuItem(
-                                text = { Text(fullLabel) },
-                                onClick = {
-                                    slotBLang = code
-                                    onSelectTargetLanguage(code)
-                                    onSelectSecondaryLanguage(slotALang)
-                                    showSlotBMenu = false
-                                }
-                            )
-                        }
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(6.dp))
-
-            // 3. Bottom Row: Status Summary + Toggle for all 13 output languages
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { showAll13Langs = !showAll13Langs }
-                    .padding(vertical = 2.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text(
-                    text = "✅ 目前手機會將聽到的任何話翻成：【$activeOutputShort】",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = EmeraldAccent,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = if (showAll13Langs) "收合 13 國清單" else "更多語言 (13國)",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Color(0xFF94A3B8)
-                    )
-                    Icon(
-                        imageVector = if (showAll13Langs) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                        contentDescription = null,
-                        tint = Color(0xFF94A3B8),
-                        modifier = Modifier.size(16.dp)
-                    )
-                }
-            }
-
-            AnimatedVisibility(visible = showAll13Langs) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 6.dp)
-                        .horizontalScroll(chipScroll),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    AppSettings.AVAILABLE_TRANSLATION_LANGUAGES.forEach { (code, fullLabel) ->
-                        val isSelected = code == targetLang
-                        val shortLabel = fullLabel.substringBefore(" (")
-                        Surface(
-                            shape = RoundedCornerShape(50),
-                            color = if (isSelected) EmeraldAccent else Color(0xFF1E293B).copy(alpha = 0.75f),
-                            border = BorderStroke(
-                                1.dp,
-                                if (isSelected) EmeraldAccent else Color.White.copy(alpha = 0.1f)
-                            ),
-                            modifier = Modifier.clickable {
-                                if (code != slotALang && code != slotBLang) {
-                                    slotBLang = code
-                                }
-                                onSelectTargetLanguage(code)
-                            }
-                        ) {
-                            Text(
-                                text = shortLabel,
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                                color = if (isSelected) Color(0xFF042F2E) else Color(0xFFE2E8F0),
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if (showGlossaryDialog) {
-        CustomGlossaryAndPromptDialog(
-            settings = settings,
-            onDismiss = { showGlossaryDialog = false },
-            onSave = { newGlossary, newContextPrompt, usePromptInterpreter ->
-                onUpdateSettings(
-                    settings.copy(
-                        customGlossaryTerms = newGlossary,
-                        translationContextPrompt = newContextPrompt,
-                        usePromptAwareInterpreter = usePromptInterpreter
-                    )
-                )
-                showGlossaryDialog = false
-            }
-        )
-    }
 }
 
 @Composable
@@ -1937,8 +2218,8 @@ private fun AnimatedVoiceOrbHero(
                         "• 點擊上方固定雙語按鈕可在通話中一鍵切換手機播出的目標語言！"
             else ->
                 "• 支援中、英、日文自然混講（自動保留日文漢字與假名、中文轉繁體）\n" +
-                        "• 前台語音 (${uiState.settings.frontendVoiceModel}) 毫秒級回應，查資料時仍可繼續聊天\n" +
-                        "• 後端大腦 (${uiState.settings.backendBrainModel}) 思考過程、Linkup 搜尋與行事曆收折於氣泡抽屜中"
+                        "• 內建手機 GPS 定位＋Linkup 搜周邊＋一鍵喚醒手機 Google Maps 導航\n" +
+                        "• 前台語音 (${uiState.settings.frontendVoiceModel}) 毫秒級回應，後端大腦 (${uiState.settings.backendBrainModel}) 推理與行事曆收折於抽屜"
         }
 
         Text(
@@ -2918,6 +3199,64 @@ private fun ChatMessageItem(
                     )
                 }
 
+                // Prominent Google Maps Navigation / Nearby Map Action Pills (Always visible right on the bubble!)
+                val mapSources = remember(message.sources) {
+                    message.sources.filter { src ->
+                        src.url.contains("google.com/maps") ||
+                                src.url.contains("maps.app.goo.gl") ||
+                                src.title.startsWith("🗺️") ||
+                                src.title.startsWith("📍")
+                    }
+                }
+                if (mapSources.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        mapSources.take(3).forEach { mapSrc ->
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = EmeraldAccent.copy(alpha = 0.18f),
+                                border = BorderStroke(1.dp, EmeraldAccent.copy(alpha = 0.65f)),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        if (mapSrc.url.isNotBlank()) {
+                                            onOpenUrl(mapSrc.url)
+                                        }
+                                    }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Place,
+                                        contentDescription = "開啟 Google Maps",
+                                        tint = EmeraldAccent,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = mapSrc.title.ifBlank { "🗺️ 開啟 Google Maps 導航" },
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFFD1FAE5),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "開啟地圖 ➔",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = EmeraldAccent
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // 5. Audio Replay & 0.75x Slow Shadowing Bar (for AI voice turns with saved PCM audio) + Save to Notebook shortcut
                 val clipPath = message.audioClipPath
                 if (message.role == MessageRole.ASSISTANT_VOICE && (!clipPath.isNullOrBlank() || isTutorBubble)) {
@@ -3459,11 +3798,31 @@ private fun SettingsAndModelFetchTab(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Text(
-                    text = "🌐 3. 網路搜尋 (Linkup) ＆ 手機行事曆工具",
+                    text = "🌐 3. 手機 GPS 定位、Google Maps 導航、Linkup 搜尋 ＆ 行事曆",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
                     color = Color.White
                 )
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("📍 啟用手機 GPS 定位、周邊搜尋與 Google Maps 導航", fontWeight = FontWeight.Medium, color = Color.White)
+                        Text(
+                            "免付費 API Key！自動讀取手機定位，結合 Linkup 搜尋附近餐廳/景點，並可直接喚醒手機 Google Maps App 導航",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFF94A3B8)
+                        )
+                    }
+                    Switch(
+                        checked = s.locationToolsEnabled,
+                        onCheckedChange = { onUpdateSettings(s.copy(locationToolsEnabled = it)) }
+                    )
+                }
+
+                HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
 
                 Row(
                     verticalAlignment = Alignment.CenterVertically,

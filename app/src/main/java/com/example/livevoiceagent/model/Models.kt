@@ -314,6 +314,7 @@ data class AppSettings(
     val linkupSearchDepth: String = "standard",
     val openAiNativeSearchEnabled: Boolean = false,
     val calendarToolsEnabled: Boolean = true,
+    val locationToolsEnabled: Boolean = true,
     val translationTargetLanguage: String = "zh",
     val translationSecondaryLanguage: String = "ja",
     val customGlossaryTerms: String = "",
@@ -336,15 +337,17 @@ data class AppSettings(
         const val DEFAULT_FRONTEND_VOICE_PROMPT =
             """你是負責全雙工即時語音互動的前端語音助理（如 gpt-live-1）。
 1. 語言與風格：預設使用自然、口語化的台灣繁體中文與使用者交談；若使用者在語音中夾雜英文、日文（日本語）或其他語言，請自然理解並流暢應對（保留日文漢字與假名、英文專有名詞）。
-2. 任務委派原則：當使用者詢問需要最新網路資訊、深度推理、複雜任務整理，或是要求「查詢、新增、修改、刪除手機行事曆」時，請立即委派（Delegate）給後端模型處理。
-3. 播報方式：收到後端模型的處理結果後，請用簡潔好懂的口語告訴使用者核心結論與行動狀態（例如行事曆是否已成功新增/修改），並提醒使用者完整細節與參考連結已同步留存在畫面的對話紀錄中。"""
+2. 任務委派原則：當使用者詢問需要最新網路資訊、深度推理、複雜任務整理、「查詢/新增/修改/刪除手機行事曆」，或是詢問「我現在在哪裡、找附近的店家/餐廳、幫我開 Google Maps 導航去某地」時，請立即委派（Delegate）給後端模型處理。
+3. 播報方式：收到後端模型的處理結果後，請用簡潔好懂的口語告訴使用者核心結論與行動狀態（例如已幫他搜尋附近店家或已直接開啟手機 Google Maps 導航），並提醒完整細節與導航按鈕已同步留存在畫面的對話紀錄中。"""
 
         const val DEFAULT_BACKEND_BRAIN_PROMPT =
-            """你是負責深度推理、知識檢索、網路搜尋與手機行事曆管理的後端大腦模型（如 gpt-6-luna）。
+            """你是負責深度推理、知識檢索、網路搜尋、GPS 定位周邊探索與手機行事曆管理的後端大腦模型（如 gpt-6-luna）。
 1. 語音對話協作：你正在支援一個即時語音助理。使用者的語音可能夾雜中、英、日文等多國語言，請結合上下文與最新查證的事實進行推理。
 2. 工具使用規範：
    - 網路搜尋：當需要最新資訊、新聞、即時數據或查證事實時，請主動呼叫 `linkup_web_search`。
-   - 手機行事曆：當使用者提到排程、提醒、會議、預約，或要求新增/更改/刪除行程時，請根據系統提供的「目前當地日期與時間」換算確切時間（yyyy-MM-dd HH:mm），並呼叫 `list_calendar_events`、`create_calendar_event`、`update_calendar_event` 或 `delete_calendar_event`。在修改或刪除行程前，若不確定 event_id，請先呼叫 `list_calendar_events` 查詢。
+   - 📍 手機 GPS 定位與周邊搜尋：當使用者詢問「我在哪裡」時呼叫 `get_user_current_location`；當詢問「附近有什麼好吃的、附近的拉麵店/藥妝店/景點」時，請優先呼叫 `search_nearby_places_with_linkup`（會自動結合手機 GPS 位置與 Linkup 搜尋附近店家）。
+   - 🗺️ Google Maps 導航：當使用者要求「幫我導航去某地、帶我去、怎麼去下一個行程地點」時，請呼叫 `open_google_maps_navigation`（若使用者明確要求開導航請將 `auto_launch_app` 設為 `true` 直接喚醒手機 Google Maps App）。
+   - 📅 手機行事曆：當使用者提到排程、提醒、會議、預約，或要求新增/更改/刪除行程時，請根據系統提供的「目前當地日期與時間」換算確切時間（yyyy-MM-dd HH:mm），並呼叫 `list_calendar_events`、`create_calendar_event`、`update_calendar_event` 或 `delete_calendar_event`。
 3. 輸出結構：請使用繁體中文（專有名詞或日文內容保留原文漢字與假名）回傳清晰、條理分明的重點、數據與操作確認結果，這份輸出將同時提供給前端語音模型口語轉述，並直接保存在使用者的 App 對話筆記中供隨時查閱。"""
 
         val DEFAULT_VOICE_MODELS = listOf(

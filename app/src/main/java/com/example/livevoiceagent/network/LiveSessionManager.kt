@@ -4,6 +4,7 @@ import android.content.Context
 import com.example.livevoiceagent.audio.FullDuplexAudioEngine
 import com.example.livevoiceagent.model.*
 import com.example.livevoiceagent.tools.CalendarToolManager
+import com.example.livevoiceagent.tools.LocationMapsToolManager
 import com.example.livevoiceagent.util.TraditionalChineseConverter
 import kotlinx.coroutines.*
 import okhttp3.*
@@ -43,6 +44,7 @@ class LiveSessionManager(
     private val context: Context,
     private val linkupClient: LinkupSearchClient,
     private val calendarToolManager: CalendarToolManager,
+    private val locationMapsToolManager: LocationMapsToolManager,
     private val backendLlmClient: BackendLlmClient,
     private val listener: LiveSessionListener
 ) {
@@ -498,13 +500,14 @@ class LiveSessionManager(
             return
         }
 
-        // IMPORTANT: In OpenAI /v1/live/sessions, client-side tools (Linkup API & Android Calendar)
+        // IMPORTANT: In OpenAI /v1/live/sessions, client-side tools (Linkup API, Android Calendar, GPS & Maps)
         // MUST use `delegation: { type: "client" }` (`session.thinking.append` + `session.commentary.append`),
         // because `/v1/live/sessions` does not accept `response.item.create` for client function_call_output,
         // and `type: "client"` keeps gpt-live-1 in full-duplex conversation with the user while searching!
         val hasLocalClientTools =
             (settings.linkupSearchEnabled && settings.linkupApiKey.isNotBlank()) ||
-                    settings.calendarToolsEnabled
+                    settings.calendarToolsEnabled ||
+                    settings.locationToolsEnabled
 
         val useClientDelegation = hasLocalClientTools ||
                 settings.delegationMode == DelegationMode.CLIENT ||
@@ -515,9 +518,14 @@ class LiveSessionManager(
         isClientDelegationSession = useClientDelegation
 
         val memoryBlock = AppSettings.buildLongTermMemoryBlock(settings)
+        val locationBlock = if (settings.locationToolsEnabled) {
+            "\n\n" + locationMapsToolManager.buildCurrentLocationContextString()
+        } else {
+            ""
+        }
         val sessionObj = JSONObject().apply {
             put("model", frontModel)
-            put("instructions", "$timeContext\n\n${settings.voiceSystemInstructions}$glossaryBlock$memoryBlock\n（補充：當後端正在查詢資料或搜尋時，你可以繼續自然地與使用者閒聊互動，直到收到後端結果為止。）")
+            put("instructions", "$timeContext$locationBlock\n\n${settings.voiceSystemInstructions}$glossaryBlock$memoryBlock\n（補充：當後端正在查詢資料、搜尋周邊或規劃導航時，你可以繼續自然地與使用者閒聊互動，直到收到後端結果為止。）")
 
             val seedArray = buildSeedInputArray(priorMessages)
             if (seedArray.length() > 0) {
@@ -1005,6 +1013,44 @@ class LiveSessionManager(
                         toolOutputText = calJson
                     }
 
+                    LocationMapsToolManager.LOCATION_MAPS_TOOL_NAMES.contains(fnName) -> {
+                        listener.onConnectionStateChanged(
+                            ConnectionState.DELEGATING,
+                            "正在執行手機 GPS 定位 / 周邊搜尋 / Google Maps 導航 ($fnName)..."
+                        )
+                        val locRes = locationMapsToolManager.executeLocationOrMapTool(
+                            toolName = fnName,
+                            args = argsJson,
+                            linkupApiKey = settings.linkupApiKey,
+                            linkupDepth = settings.linkupSearchDepth
+                        )
+                        locRes.linkupResult?.let { listener.onSearchCardAdded(it, turnIdx) }
+                        locRes.mapActionSource?.let { mapSource ->
+                            if (locRes.linkupResult == null) {
+                                listener.onSearchCardAdded(
+                                    LinkupSearchResult(
+                                        query = mapSource.title,
+                                        answer = locRes.actionLogText,
+                                        sources = listOf(mapSource),
+                                        rawFormattedForLlm = locRes.toolOutputJson
+                                    ),
+                                    turnIdx
+                                )
+                            }
+                        }
+                        if (locRes.actionLogText.isNotBlank()) {
+                            listener.onTranscriptDelta(
+                                role = MessageRole.SYSTEM,
+                                delta = locRes.actionLogText,
+                                timelineMs = System.currentTimeMillis(),
+                                modelTag = "Location & Maps",
+                                streamKey = "turn_${sessionEpochId}_${turnIdx}_loc_$callId",
+                                turnIndex = turnIdx
+                            )
+                        }
+                        toolOutputText = locRes.toolOutputJson
+                    }
+
                     else -> {
                         toolOutputText = "{\"status\":\"error\",\"message\":\"Unknown tool: $fnName\"}"
                     }
@@ -1063,11 +1109,20 @@ class LiveSessionManager(
             CalendarToolManager.buildResponsesCalendarToolSchemas().forEach { toolsArr.put(it) }
         }
 
+        if (settings.locationToolsEnabled) {
+            LocationMapsToolManager.buildResponsesLocationToolSchemas().forEach { toolsArr.put(it) }
+        }
+
         val memoryBlock = AppSettings.buildLongTermMemoryBlock(settings)
-        val instructionsText = if (settings.appMode == AppMode.TUTOR) {
-            "$timeContext\n\n${AppSettings.buildTutorVoiceInstructions(settings, activeNotebookEntries)}"
+        val locationBlock = if (settings.locationToolsEnabled) {
+            "\n\n" + locationMapsToolManager.buildCurrentLocationContextString()
         } else {
-            "$timeContext\n\n${settings.voiceSystemInstructions}$memoryBlock"
+            ""
+        }
+        val instructionsText = if (settings.appMode == AppMode.TUTOR) {
+            "$timeContext$locationBlock\n\n${AppSettings.buildTutorVoiceInstructions(settings, activeNotebookEntries)}"
+        } else {
+            "$timeContext$locationBlock\n\n${settings.voiceSystemInstructions}$memoryBlock"
         }
 
         val sessionUpdate = JSONObject().apply {
@@ -1471,6 +1526,41 @@ class LiveSessionManager(
                             turnIndex = turnIdx
                         )
                         outputText = calJson
+                    }
+
+                    LocationMapsToolManager.LOCATION_MAPS_TOOL_NAMES.contains(fnName) -> {
+                        listener.onConnectionStateChanged(ConnectionState.DELEGATING, "正在執行定位/周邊搜尋/Google Maps導航 ($fnName)...")
+                        val locRes = locationMapsToolManager.executeLocationOrMapTool(
+                            toolName = fnName,
+                            args = argsJson,
+                            linkupApiKey = settings.linkupApiKey,
+                            linkupDepth = settings.linkupSearchDepth
+                        )
+                        locRes.linkupResult?.let { listener.onSearchCardAdded(it, turnIdx) }
+                        locRes.mapActionSource?.let { mapSource ->
+                            if (locRes.linkupResult == null) {
+                                listener.onSearchCardAdded(
+                                    LinkupSearchResult(
+                                        query = mapSource.title,
+                                        answer = locRes.actionLogText,
+                                        sources = listOf(mapSource),
+                                        rawFormattedForLlm = locRes.toolOutputJson
+                                    ),
+                                    turnIdx
+                                )
+                            }
+                        }
+                        if (locRes.actionLogText.isNotBlank()) {
+                            listener.onTranscriptDelta(
+                                role = MessageRole.SYSTEM,
+                                delta = locRes.actionLogText,
+                                timelineMs = System.currentTimeMillis(),
+                                modelTag = "Location & Maps",
+                                streamKey = "turn_${sessionEpochId}_${turnIdx}_loc_$callId",
+                                turnIndex = turnIdx
+                            )
+                        }
+                        outputText = locRes.toolOutputJson
                     }
 
                     else -> {

@@ -57,6 +57,7 @@ class ConversationRepository(private val context: Context) {
             linkupSearchDepth = prefs.getString("linkupSearchDepth", "standard") ?: "standard",
             openAiNativeSearchEnabled = prefs.getBoolean("openAiNativeSearchEnabled", false),
             calendarToolsEnabled = prefs.getBoolean("calendarToolsEnabled", true),
+            locationToolsEnabled = prefs.getBoolean("locationToolsEnabled", true),
             translationTargetLanguage = prefs.getString("translationTargetLanguage", "zh") ?: "zh",
             translationSecondaryLanguage = prefs.getString("translationSecondaryLanguage", "ja") ?: "ja",
             customGlossaryTerms = prefs.getString("customGlossaryTerms", "") ?: "",
@@ -100,6 +101,7 @@ class ConversationRepository(private val context: Context) {
             putString("linkupSearchDepth", settings.linkupSearchDepth)
             putBoolean("openAiNativeSearchEnabled", settings.openAiNativeSearchEnabled)
             putBoolean("calendarToolsEnabled", settings.calendarToolsEnabled)
+            putBoolean("locationToolsEnabled", settings.locationToolsEnabled)
             putString("translationTargetLanguage", settings.translationTargetLanguage.trim())
             putString("translationSecondaryLanguage", settings.translationSecondaryLanguage.trim())
             putString("customGlossaryTerms", settings.customGlossaryTerms)

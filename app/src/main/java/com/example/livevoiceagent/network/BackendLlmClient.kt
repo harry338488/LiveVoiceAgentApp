@@ -2,6 +2,7 @@ package com.example.livevoiceagent.network
 
 import com.example.livevoiceagent.model.*
 import com.example.livevoiceagent.tools.CalendarToolManager
+import com.example.livevoiceagent.tools.LocationMapsToolManager
 import com.example.livevoiceagent.util.TraditionalChineseConverter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -21,7 +22,8 @@ data class BackendBrainResponse(
 
 class BackendLlmClient(
     private val linkupClient: LinkupSearchClient,
-    private val calendarToolManager: CalendarToolManager
+    private val calendarToolManager: CalendarToolManager,
+    private val locationMapsToolManager: LocationMapsToolManager
 ) {
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
@@ -45,12 +47,18 @@ class BackendLlmClient(
         runCatching {
             val (baseUrl, apiKey, model) = resolveBackendCredentials(settings)
             val timeContext = CalendarToolManager.buildCurrentTimeContextString()
+            val locationContext = if (settings.locationToolsEnabled) {
+                locationMapsToolManager.buildCurrentLocationContextString().let {
+                    if (it.isNotBlank()) "\n$it" else ""
+                }
+            } else ""
             val memoryBlock = AppSettings.buildLongTermMemoryBlock(settings)
-            val systemInstructions = "$timeContext\n\n${settings.backendSystemInstructions}$memoryBlock"
+            val systemInstructions = "$timeContext$locationContext\n\n${settings.backendSystemInstructions}$memoryBlock"
 
             val collectedSearches = mutableListOf<LinkupSearchResult>()
             val canUseLinkup = settings.linkupSearchEnabled && settings.linkupApiKey.isNotBlank()
             val canUseCalendar = settings.calendarToolsEnabled
+            val canUseLocation = settings.locationToolsEnabled
 
             onThinkingStatusUpdate("後端模型 $model 正在分析問題與檢索資料，若使用者說話請自然陪他聊天...")
 
@@ -69,6 +77,7 @@ class BackendLlmClient(
                         settings = settings,
                         canUseLinkup = canUseLinkup,
                         canUseCalendar = canUseCalendar,
+                        canUseLocation = canUseLocation,
                         collectedSearches = collectedSearches,
                         onThinkingStatusUpdate = onThinkingStatusUpdate,
                         onSearchExecuted = onSearchExecuted,
@@ -86,6 +95,7 @@ class BackendLlmClient(
                         settings = settings,
                         canUseLinkup = canUseLinkup,
                         canUseCalendar = canUseCalendar,
+                        canUseLocation = canUseLocation,
                         collectedSearches = collectedSearches,
                         onThinkingStatusUpdate = onThinkingStatusUpdate,
                         onSearchExecuted = onSearchExecuted,
@@ -104,6 +114,7 @@ class BackendLlmClient(
                     settings = settings,
                     canUseLinkup = canUseLinkup,
                     canUseCalendar = canUseCalendar,
+                    canUseLocation = canUseLocation,
                     collectedSearches = collectedSearches,
                     onThinkingStatusUpdate = onThinkingStatusUpdate,
                     onSearchExecuted = onSearchExecuted,
@@ -137,6 +148,7 @@ class BackendLlmClient(
         settings: AppSettings,
         canUseLinkup: Boolean,
         canUseCalendar: Boolean,
+        canUseLocation: Boolean,
         collectedSearches: MutableList<LinkupSearchResult>,
         onThinkingStatusUpdate: (String) -> Unit,
         onSearchExecuted: (LinkupSearchResult) -> Unit,
@@ -200,6 +212,9 @@ class BackendLlmClient(
         }
         if (canUseCalendar) {
             CalendarToolManager.buildResponsesCalendarToolSchemas().forEach { toolsArr.put(it) }
+        }
+        if (canUseLocation) {
+            LocationMapsToolManager.buildResponsesLocationToolSchemas().forEach { toolsArr.put(it) }
         }
         if (settings.openAiNativeSearchEnabled) {
             toolsArr.put(JSONObject().apply { put("type", "web_search") })
@@ -300,6 +315,31 @@ class BackendLlmClient(
                         calRes
                     }
 
+                    LocationMapsToolManager.LOCATION_MAPS_TOOL_NAMES.contains(fnName) -> {
+                        onThinkingStatusUpdate("正在讀取手機 GPS 定位 / 結合 Linkup 搜尋周邊 / 規劃 Google Maps 導航 ($fnName)...")
+                        val locRes = locationMapsToolManager.executeLocationOrMapTool(
+                            toolName = fnName,
+                            argsJson = argsJson,
+                            linkupApiKey = settings.linkupApiKey,
+                            linkupDepth = settings.linkupSearchDepth
+                        )
+                        onCalendarActionLogged(locRes.actionLogText)
+                        if (locRes.linkupResult != null) {
+                            collectedSearches.add(locRes.linkupResult)
+                            onSearchExecuted(locRes.linkupResult)
+                        } else if (locRes.mapActionSource != null) {
+                            val mapCard = LinkupSearchResult(
+                                query = locRes.mapActionSource.title,
+                                answer = locRes.mapActionSource.snippet,
+                                sources = listOf(locRes.mapActionSource),
+                                rawFormattedForLlm = locRes.toolOutputJson
+                            )
+                            collectedSearches.add(mapCard)
+                            onSearchExecuted(mapCard)
+                        }
+                        locRes.toolOutputJson
+                    }
+
                     else -> "{\"status\":\"error\",\"message\":\"Unsupported tool: $fnName\"}"
                 }
 
@@ -324,6 +364,7 @@ class BackendLlmClient(
         settings: AppSettings,
         canUseLinkup: Boolean,
         canUseCalendar: Boolean,
+        canUseLocation: Boolean,
         collectedSearches: MutableList<LinkupSearchResult>,
         onThinkingStatusUpdate: (String) -> Unit,
         onSearchExecuted: (LinkupSearchResult) -> Unit,
@@ -389,6 +430,9 @@ class BackendLlmClient(
         if (canUseCalendar) {
             CalendarToolManager.buildChatCompletionsCalendarToolSchemas().forEach { toolsArray.put(it) }
         }
+        if (canUseLocation) {
+            LocationMapsToolManager.buildChatCompletionsLocationToolSchemas().forEach { toolsArray.put(it) }
+        }
 
         var finalContent = ""
         for (round in 0 until 4) {
@@ -449,6 +493,31 @@ class BackendLlmClient(
                         val calRes = calendarToolManager.executeCalendarTool(fnName, argsJson)
                         onCalendarActionLogged("📅 行事曆操作 (`$fnName`):\n$calRes")
                         calRes
+                    }
+
+                    LocationMapsToolManager.LOCATION_MAPS_TOOL_NAMES.contains(fnName) -> {
+                        onThinkingStatusUpdate("正在讀取手機 GPS 定位 / 結合 Linkup 搜尋周邊 / 規劃 Google Maps 導航 ($fnName)...")
+                        val locRes = locationMapsToolManager.executeLocationOrMapTool(
+                            toolName = fnName,
+                            argsJson = argsJson,
+                            linkupApiKey = settings.linkupApiKey,
+                            linkupDepth = settings.linkupSearchDepth
+                        )
+                        onCalendarActionLogged(locRes.actionLogText)
+                        if (locRes.linkupResult != null) {
+                            collectedSearches.add(locRes.linkupResult)
+                            onSearchExecuted(locRes.linkupResult)
+                        } else if (locRes.mapActionSource != null) {
+                            val mapCard = LinkupSearchResult(
+                                query = locRes.mapActionSource.title,
+                                answer = locRes.mapActionSource.snippet,
+                                sources = listOf(locRes.mapActionSource),
+                                rawFormattedForLlm = locRes.toolOutputJson
+                            )
+                            collectedSearches.add(mapCard)
+                            onSearchExecuted(mapCard)
+                        }
+                        locRes.toolOutputJson
                     }
 
                     else -> "{\"status\":\"error\",\"message\":\"Unsupported tool: $fnName\"}"

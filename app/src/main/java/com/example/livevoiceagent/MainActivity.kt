@@ -86,6 +86,14 @@ class MainActivity : ComponentActivity() {
                                 needed.add(Manifest.permission.WRITE_CALENDAR)
                             }
                         }
+                        if (mainViewModel.uiState.value.settings.locationToolsEnabled) {
+                            if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED &&
+                                ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED
+                            ) {
+                                needed.add(Manifest.permission.ACCESS_FINE_LOCATION)
+                                needed.add(Manifest.permission.ACCESS_COARSE_LOCATION)
+                            }
+                        }
 
                         if (needed.isEmpty()) {
                             mainViewModel.toggleLiveCall()
