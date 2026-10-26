@@ -58,6 +58,15 @@ class ConversationRepository(private val context: Context) {
             openAiNativeSearchEnabled = prefs.getBoolean("openAiNativeSearchEnabled", false),
             calendarToolsEnabled = prefs.getBoolean("calendarToolsEnabled", true),
             locationToolsEnabled = prefs.getBoolean("locationToolsEnabled", true),
+            googleMapsApiKey = prefs.getString("googleMapsApiKey", "") ?: "",
+            autoEndCallOnNavigation = prefs.getBoolean("autoEndCallOnNavigation", true),
+            wakeWordEnabled = prefs.getBoolean("wakeWordEnabled", false),
+            wakeWordPhrase = prefs.getString("wakeWordPhrase", "hey Luna 我需要你") ?: "hey Luna 我需要你",
+            wakeWordVoiceprintEnabled = prefs.getBoolean("wakeWordVoiceprintEnabled", true),
+            wakeWordVoiceprintData = prefs.getString("wakeWordVoiceprintData", "") ?: "",
+            wakeWordFirstUtteranceTimeoutSec = prefs.getInt("wakeWordFirstUtteranceTimeoutSec", 8),
+            wakeWordIdleTimeoutSec = prefs.getInt("wakeWordIdleTimeoutSec", 25),
+            wakeWordMaxDurationSec = prefs.getInt("wakeWordMaxDurationSec", 90),
             translationTargetLanguage = prefs.getString("translationTargetLanguage", "zh") ?: "zh",
             translationSecondaryLanguage = prefs.getString("translationSecondaryLanguage", "ja") ?: "ja",
             customGlossaryTerms = prefs.getString("customGlossaryTerms", "") ?: "",
@@ -102,6 +111,15 @@ class ConversationRepository(private val context: Context) {
             putBoolean("openAiNativeSearchEnabled", settings.openAiNativeSearchEnabled)
             putBoolean("calendarToolsEnabled", settings.calendarToolsEnabled)
             putBoolean("locationToolsEnabled", settings.locationToolsEnabled)
+            putString("googleMapsApiKey", settings.googleMapsApiKey.trim())
+            putBoolean("autoEndCallOnNavigation", settings.autoEndCallOnNavigation)
+            putBoolean("wakeWordEnabled", settings.wakeWordEnabled)
+            putString("wakeWordPhrase", settings.wakeWordPhrase.trim().ifBlank { "hey Luna 我需要你" })
+            putBoolean("wakeWordVoiceprintEnabled", settings.wakeWordVoiceprintEnabled)
+            putString("wakeWordVoiceprintData", settings.wakeWordVoiceprintData)
+            putInt("wakeWordFirstUtteranceTimeoutSec", settings.wakeWordFirstUtteranceTimeoutSec.coerceIn(5, 30))
+            putInt("wakeWordIdleTimeoutSec", settings.wakeWordIdleTimeoutSec.coerceIn(10, 120))
+            putInt("wakeWordMaxDurationSec", settings.wakeWordMaxDurationSec.coerceIn(30, 600))
             putString("translationTargetLanguage", settings.translationTargetLanguage.trim())
             putString("translationSecondaryLanguage", settings.translationSecondaryLanguage.trim())
             putString("customGlossaryTerms", settings.customGlossaryTerms)

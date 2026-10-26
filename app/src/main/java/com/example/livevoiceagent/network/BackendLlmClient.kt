@@ -321,7 +321,8 @@ class BackendLlmClient(
                             toolName = fnName,
                             argsJson = argsJson,
                             linkupApiKey = settings.linkupApiKey,
-                            linkupDepth = settings.linkupSearchDepth
+                            linkupDepth = settings.linkupSearchDepth,
+                            googleMapsApiKey = settings.googleMapsApiKey
                         )
                         onCalendarActionLogged(locRes.actionLogText)
                         if (locRes.linkupResult != null) {
@@ -501,7 +502,8 @@ class BackendLlmClient(
                             toolName = fnName,
                             argsJson = argsJson,
                             linkupApiKey = settings.linkupApiKey,
-                            linkupDepth = settings.linkupSearchDepth
+                            linkupDepth = settings.linkupSearchDepth,
+                            googleMapsApiKey = settings.googleMapsApiKey
                         )
                         onCalendarActionLogged(locRes.actionLogText)
                         if (locRes.linkupResult != null) {

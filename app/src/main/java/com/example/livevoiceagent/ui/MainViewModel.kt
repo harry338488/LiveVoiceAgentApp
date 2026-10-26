@@ -3,13 +3,19 @@ package com.example.livevoiceagent.ui
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.livevoiceagent.audio.WakeWordManager
 import com.example.livevoiceagent.data.ConversationRepository
 import com.example.livevoiceagent.model.*
 import com.example.livevoiceagent.network.*
 import com.example.livevoiceagent.tools.CalendarToolManager
 import com.example.livevoiceagent.tools.LocationMapsToolManager
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -18,6 +24,12 @@ import java.util.Date
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
+
+data class GoogleMapsLaunchRequest(
+    val primaryUri: String,
+    val fallbackWebUrl: String,
+    val destinationLabel: String
+)
 
 data class UiState(
     val settings: AppSettings = AppSettings(),
@@ -39,6 +51,10 @@ data class UiState(
     val isExtractingMemory: Boolean = false,
     val isAnalyzingImage: Boolean = false,
     val modelFetchStatus: String = "",
+    val isWakeWordStandbyActive: Boolean = false,
+    val wakeWordStandbyStatus: String = "語音喚醒待機已關閉",
+    val isEnrollingVoiceprint: Boolean = false,
+    val voiceprintStatusMessage: String = "",
     val errorToast: String? = null
 )
 
@@ -59,10 +75,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
         listener = this
     )
 
+    private val wakeWordManager = WakeWordManager(
+        context = application.applicationContext,
+        onWakeWordDetected = { transcript, similarityScore ->
+            handleWakeWordTriggered(transcript, similarityScore)
+        },
+        onStandbyStatusChanged = { isListening, statusMsg ->
+            _uiState.update {
+                it.copy(
+                    isWakeWordStandbyActive = isListening,
+                    wakeWordStandbyStatus = statusMsg
+                )
+            }
+        }
+    )
+
     private val _uiState = MutableStateFlow(UiState())
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
 
+    private val _googleMapsLaunchEvent = MutableSharedFlow<GoogleMapsLaunchRequest>(extraBufferCapacity = 4)
+    val googleMapsLaunchEvent: SharedFlow<GoogleMapsLaunchRequest> = _googleMapsLaunchEvent.asSharedFlow()
+
     private val isGeneratingTitle = AtomicBoolean(false)
+    private var pendingAutoHangupJob: Job? = null
 
     init {
         val loadedSettings = repository.loadSettings()
@@ -75,14 +110,68 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
                 )
             )
         }
+
+        // Wire 100% zero-click Google Maps auto-navigation + optional auto-hangup on navigation
+        locationMapsToolManager.onAutoLaunchGoogleMaps = { primaryUri, fallbackWebUrl, destLabel ->
+            _googleMapsLaunchEvent.tryEmit(
+                GoogleMapsLaunchRequest(
+                    primaryUri = primaryUri,
+                    fallbackWebUrl = fallbackWebUrl,
+                    destinationLabel = destLabel
+                )
+            )
+            if (_uiState.value.settings.autoEndCallOnNavigation &&
+                _uiState.value.connectionState != ConnectionState.DISCONNECTED
+            ) {
+                onAutoHangupRequested(
+                    reason = "🧭 已自動跳轉 Google Maps 導航至「$destLabel」，並自動結束語音通話（避免與導航語音搶麥克風）",
+                    delayMs = 2800L
+                )
+            }
+        }
+
+        // Wire LLM-invoked `end_live_voice_session` tool (voice goodbye / bystander false wake protection)
+        locationMapsToolManager.onRequestEndLiveSession = { reason ->
+            val isBystander = reason.contains("bystander", ignoreCase = true)
+            val delayMs = if (isBystander) 400L else 2800L
+            val bannerMsg = if (isBystander) {
+                "🛡️ AI 偵測到旁人閒聊誤觸，已靜音秒掛斷並退回 $0 待機"
+            } else {
+                "👋 AI 已完成道別並自動結束語音通話"
+            }
+            onAutoHangupRequested(reason = bannerMsg, delayMs = delayMs)
+        }
+
         viewModelScope.launch {
             val sessions = repository.loadAllSessions()
             val notebook = repository.loadNotebookEntries()
             _uiState.update { it.copy(savedSessions = sessions, tutorNotebook = notebook) }
+            if (loadedSettings.wakeWordEnabled) {
+                wakeWordManager.startStandby(loadedSettings)
+            }
         }
     }
 
+    private fun handleWakeWordTriggered(transcript: String, similarityScore: Float) {
+        val state = _uiState.value
+        if (state.connectionState != ConnectionState.DISCONNECTED) return
+        val scorePercent = (similarityScore * 100).toInt()
+        val vpTag = if (state.settings.wakeWordVoiceprintEnabled && state.settings.wakeWordVoiceprintData.isNotBlank()) {
+            " · 聲紋吻合 $scorePercent%"
+        } else {
+            ""
+        }
+        _uiState.update {
+            it.copy(
+                statusBanner = "🗣️ 語音喚醒成功（「$transcript」$vpTag）— 正在啟動全雙工對話...",
+                errorToast = "🗣️ 喚醒成功！「$transcript」$vpTag"
+            )
+        }
+        startLiveCall(isWakeWordSession = true)
+    }
+
     fun updateSettings(newSettings: AppSettings) {
+        val oldSettings = _uiState.value.settings
         repository.saveSettings(newSettings)
         _uiState.update { state ->
             state.copy(
@@ -95,6 +184,86 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
                 } else {
                     state.currentSession
                 }
+            )
+        }
+        // Sync WakeWordManager standby if wake word settings changed while disconnected
+        if (_uiState.value.connectionState == ConnectionState.DISCONNECTED) {
+            if (newSettings.wakeWordEnabled) {
+                if (!oldSettings.wakeWordEnabled ||
+                    oldSettings.wakeWordPhrase != newSettings.wakeWordPhrase ||
+                    oldSettings.wakeWordVoiceprintEnabled != newSettings.wakeWordVoiceprintEnabled ||
+                    oldSettings.wakeWordVoiceprintData != newSettings.wakeWordVoiceprintData
+                ) {
+                    wakeWordManager.startStandby(newSettings)
+                }
+            } else if (oldSettings.wakeWordEnabled) {
+                wakeWordManager.stopStandby()
+            }
+        }
+    }
+
+    fun setWakeWordEnabled(enabled: Boolean) {
+        val updated = _uiState.value.settings.copy(wakeWordEnabled = enabled)
+        updateSettings(updated)
+    }
+
+    fun enrollUserVoiceprint() {
+        if (_uiState.value.isEnrollingVoiceprint) return
+        if (_uiState.value.connectionState != ConnectionState.DISCONNECTED) {
+            _uiState.update { it.copy(errorToast = "請先結束目前的語音通話，再錄製本人聲紋樣本") }
+            return
+        }
+        val phrase = _uiState.value.settings.wakeWordPhrase.ifBlank { "hey Luna 我需要你" }
+        _uiState.update {
+            it.copy(
+                isEnrollingVoiceprint = true,
+                voiceprintStatusMessage = "🎙️ 請現在對著手機自然說出：「$phrase」（錄音 3 秒中...）"
+            )
+        }
+        viewModelScope.launch {
+            val res = wakeWordManager.enrollVoiceprintSample(_uiState.value.settings.wakeWordVoiceprintData)
+            res.onSuccess { updatedJson ->
+                val profile = WakeWordManager.VoiceprintProfile.fromJson(updatedJson)
+                val count = profile?.sampleCount ?: 1
+                val pitchHz = profile?.meanPitchHz?.toInt() ?: 0
+                val newSettings = _uiState.value.settings.copy(
+                    wakeWordVoiceprintData = updatedJson,
+                    wakeWordVoiceprintEnabled = true
+                )
+                repository.saveSettings(newSettings)
+                _uiState.update {
+                    it.copy(
+                        settings = newSettings,
+                        isEnrollingVoiceprint = false,
+                        voiceprintStatusMessage = "✅ 聲紋樣本錄製成功！（已累積 $count 次樣本 · 基頻約 ${pitchHz}Hz）",
+                        errorToast = "✅ 已更新本人聲紋鎖（第 $count 次取樣）"
+                    )
+                }
+                if (newSettings.wakeWordEnabled && _uiState.value.connectionState == ConnectionState.DISCONNECTED) {
+                    wakeWordManager.startStandby(newSettings)
+                }
+            }.onFailure { err ->
+                val curSettings = _uiState.value.settings
+                _uiState.update {
+                    it.copy(
+                        isEnrollingVoiceprint = false,
+                        voiceprintStatusMessage = "⚠️ ${err.message}"
+                    )
+                }
+                if (curSettings.wakeWordEnabled && _uiState.value.connectionState == ConnectionState.DISCONNECTED) {
+                    wakeWordManager.startStandby(curSettings)
+                }
+            }
+        }
+    }
+
+    fun clearUserVoiceprint() {
+        val newSettings = _uiState.value.settings.copy(wakeWordVoiceprintData = "")
+        updateSettings(newSettings)
+        _uiState.update {
+            it.copy(
+                voiceprintStatusMessage = "🗑️ 已清除已錄製的聲紋資料",
+                errorToast = "已重設本人聲紋鎖資料"
             )
         }
     }
@@ -122,13 +291,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
     fun toggleLiveCall() {
         val state = _uiState.value
         if (state.connectionState == ConnectionState.DISCONNECTED) {
-            startLiveCall()
+            startLiveCall(isWakeWordSession = false)
         } else {
             stopLiveCall()
         }
     }
 
-    fun startLiveCall() {
+    fun startLiveCall(isWakeWordSession: Boolean = false) {
+        pendingAutoHangupJob?.cancel()
+        wakeWordManager.stopStandby()
         val state = _uiState.value
         _uiState.update { it.copy(isMuted = false, voiceUsageSeconds = 0) }
         liveSessionManager.connect(
@@ -136,11 +307,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
             priorMessages = state.currentSession.messages,
             notebookEntries = state.tutorNotebook,
             conversationSnapshotProvider = { _uiState.value.currentSession.messages },
-            useSpeakerphone = state.isSpeakerphoneOn
+            useSpeakerphone = state.isSpeakerphoneOn,
+            isWakeWordSession = isWakeWordSession
         )
     }
 
     fun stopLiveCall() {
+        pendingAutoHangupJob?.cancel()
         liveSessionManager.disconnectGracefully()
         triggerAiTitleGenerationIfNeeded()
         triggerBackgroundMemoryExtractionIfNeeded()
@@ -705,6 +878,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
         _uiState.update {
             it.copy(connectionState = state, statusBanner = statusText)
         }
+        if (state == ConnectionState.DISCONNECTED) {
+            viewModelScope.launch {
+                delay(650L)
+                val current = _uiState.value
+                if (current.connectionState == ConnectionState.DISCONNECTED &&
+                    current.settings.wakeWordEnabled &&
+                    !current.isEnrollingVoiceprint
+                ) {
+                    wakeWordManager.startStandby(current.settings)
+                }
+            }
+        }
+    }
+
+    override fun onAutoHangupRequested(reason: String, delayMs: Long) {
+        pendingAutoHangupJob?.cancel()
+        pendingAutoHangupJob = viewModelScope.launch {
+            if (delayMs > 0L) {
+                delay(delayMs)
+            }
+            if (_uiState.value.connectionState != ConnectionState.DISCONNECTED) {
+                wakeWordManager.playHangupToneAndVibrate()
+                stopLiveCall()
+                _uiState.update {
+                    it.copy(
+                        statusBanner = reason,
+                        errorToast = reason
+                    )
+                }
+            }
+        }
     }
 
     override fun onRemoteSessionIdResolved(sessionId: String) {
@@ -966,6 +1170,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
 
     override fun onCleared() {
         super.onCleared()
+        pendingAutoHangupJob?.cancel()
+        wakeWordManager.stopStandby()
         liveSessionManager.disconnectImmediate()
     }
 }

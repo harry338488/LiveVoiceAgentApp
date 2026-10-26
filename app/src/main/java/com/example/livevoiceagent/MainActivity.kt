@@ -1,7 +1,10 @@
 package com.example.livevoiceagent
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -14,8 +17,11 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
+import com.example.livevoiceagent.network.ConnectionState
 import com.example.livevoiceagent.ui.MainScreen
 import com.example.livevoiceagent.ui.MainViewModel
+import kotlinx.coroutines.launch
 
 private val AiVoiceDarkColorScheme = darkColorScheme(
     primary = Color(0xFF38BDF8),          // Electric Sky Cyan
@@ -52,6 +58,19 @@ class MainActivity : ComponentActivity() {
         window.statusBarColor = Color(0xFF080C14).toArgb()
         window.navigationBarColor = Color(0xFF0B1120).toArgb()
 
+        // Observe 100% zero-click Google Maps auto-navigation events on the foreground Activity UI thread
+        lifecycleScope.launch {
+            mainViewModel.googleMapsLaunchEvent.collect { req ->
+                launchGoogleMapsZeroClick(
+                    primaryUri = req.primaryUri,
+                    fallbackWebUrl = req.fallbackWebUrl,
+                    destinationLabel = req.destinationLabel
+                )
+            }
+        }
+
+        handleVoiceAssistantIntentIfNeeded(intent)
+
         setContent {
             val permissionsLauncher = rememberLauncherForActivityResult(
                 contract = ActivityResultContracts.RequestMultiplePermissions()
@@ -78,6 +97,11 @@ class MainActivity : ComponentActivity() {
                         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
                             needed.add(Manifest.permission.RECORD_AUDIO)
                         }
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                        ) {
+                            needed.add(Manifest.permission.POST_NOTIFICATIONS)
+                        }
                         if (mainViewModel.uiState.value.settings.calendarToolsEnabled) {
                             if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CALENDAR) != PackageManager.PERMISSION_GRANTED) {
                                 needed.add(Manifest.permission.READ_CALENDAR)
@@ -103,6 +127,58 @@ class MainActivity : ComponentActivity() {
                     }
                 )
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleVoiceAssistantIntentIfNeeded(intent)
+    }
+
+    private fun handleVoiceAssistantIntentIfNeeded(intent: Intent?) {
+        val action = intent?.action ?: return
+        if (action == Intent.ACTION_ASSIST || action == Intent.ACTION_VOICE_COMMAND) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED &&
+                mainViewModel.uiState.value.connectionState == ConnectionState.DISCONNECTED
+            ) {
+                mainViewModel.startLiveCall(isWakeWordSession = true)
+            }
+        }
+    }
+
+    private fun launchGoogleMapsZeroClick(
+        primaryUri: String,
+        fallbackWebUrl: String,
+        destinationLabel: String
+    ) {
+        Toast.makeText(
+            this,
+            "🧭 正在自動跳轉 Google Maps 導航：$destinationLabel",
+            Toast.LENGTH_SHORT
+        ).show()
+
+        // 1. Try native Google Maps package with primaryUri (e.g. google.navigation:q=...&mode=w)
+        val launchedNativePkg = runCatching {
+            val mapIntent = Intent(Intent.ACTION_VIEW, Uri.parse(primaryUri)).apply {
+                setPackage("com.google.android.apps.maps")
+            }
+            startActivity(mapIntent)
+            true
+        }.getOrDefault(false)
+
+        if (launchedNativePkg) return
+
+        // 2. Try generic VIEW intent with primaryUri
+        val launchedGeneric = runCatching {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(primaryUri)))
+            true
+        }.getOrDefault(false)
+
+        if (launchedGeneric) return
+
+        // 3. Fallback to Google Maps Universal Web URL
+        runCatching {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(fallbackWebUrl)))
         }
     }
 }

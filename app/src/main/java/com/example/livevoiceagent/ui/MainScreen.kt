@@ -7,6 +7,8 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -55,6 +57,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import com.example.livevoiceagent.audio.WakeWordManager
 import com.example.livevoiceagent.model.*
 import com.example.livevoiceagent.network.ConnectionState
 import kotlinx.coroutines.launch
@@ -88,6 +92,45 @@ private val EmeraldAccent = Color(0xFF10B981)
 private val AmberTutorAccent = Color(0xFFF59E0B)
 private val RoseDanger = Color(0xFFF43F5E)
 
+private data class MapPreviewData(
+    val lat: Double,
+    val lon: Double,
+    val userLat: Double?,
+    val userLon: Double?,
+    val name: String,
+    val address: String,
+    val meta: String,
+    val navUrl: String
+)
+
+private fun parseMapPreviewSnippet(snippet: String, fallbackTitle: String, navUrl: String): MapPreviewData? {
+    if (!snippet.startsWith("MAP_PREVIEW|")) return null
+    val map = mutableMapOf<String, String>()
+    snippet.removePrefix("MAP_PREVIEW|").split("|").forEach { part ->
+        val idx = part.indexOf('=')
+        if (idx > 0) {
+            map[part.substring(0, idx)] = part.substring(idx + 1)
+        }
+    }
+    val lat = map["lat"]?.toDoubleOrNull() ?: return null
+    val lon = map["lon"]?.toDoubleOrNull() ?: return null
+    val uLat = map["uLat"]?.toDoubleOrNull()
+    val uLon = map["uLon"]?.toDoubleOrNull()
+    val name = map["name"].orEmpty().ifBlank { fallbackTitle }
+    val addr = map["addr"].orEmpty()
+    val meta = map["meta"].orEmpty()
+    return MapPreviewData(
+        lat = lat,
+        lon = lon,
+        userLat = uLat,
+        userLon = uLon,
+        name = name,
+        address = addr,
+        meta = meta,
+        navUrl = navUrl
+    )
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(
@@ -104,6 +147,8 @@ fun MainScreen(
     var showModeConfigBottomSheet by remember { mutableStateOf(false) }
     var showNotebookDialog by remember { mutableStateOf(false) }
     var showMemoryDialog by remember { mutableStateOf(false) }
+    var showWakeWordDialog by remember { mutableStateOf(false) }
+    var activeMapPreviewData by remember { mutableStateOf<MapPreviewData?>(null) }
 
     val currentMode = uiState.settings.appMode
     val isTranslationMode = currentMode == AppMode.TRANSLATE
@@ -323,7 +368,8 @@ fun MainScreen(
                         uiState = uiState,
                         onUpdateSettings = { viewModel.updateSettings(it) },
                         onFetchModels = { viewModel.fetchModelsFromApis() },
-                        onOpenMemoryHub = { showMemoryDialog = true }
+                        onOpenMemoryHub = { showMemoryDialog = true },
+                        onOpenWakeWordDialog = { showWakeWordDialog = true }
                     )
                 } else {
                     LiveConversationTab(
@@ -331,6 +377,8 @@ fun MainScreen(
                         currentMode = currentMode,
                         onOpenModeConfigSheet = { showModeConfigBottomSheet = true },
                         onOpenNotebookDialog = { showNotebookDialog = true },
+                        onOpenWakeWordDialog = { showWakeWordDialog = true },
+                        onOpenMapPreview = { preview -> activeMapPreviewData = preview },
                         onSelectTargetLanguage = { viewModel.setTranslationTargetLanguage(it) },
                         onSelectSecondaryLanguage = { viewModel.setTranslationSecondaryLanguage(it) },
                         onUpdateSettings = { viewModel.updateSettings(it) },
@@ -370,6 +418,10 @@ fun MainScreen(
                     showModeConfigBottomSheet = false
                     showNotebookDialog = true
                 },
+                onOpenWakeWordDialog = {
+                    showModeConfigBottomSheet = false
+                    showWakeWordDialog = true
+                },
                 onOpenFullSettings = {
                     showModeConfigBottomSheet = false
                     showFullSettingsScreen = true
@@ -377,6 +429,36 @@ fun MainScreen(
                 onDismiss = { showModeConfigBottomSheet = false }
             )
         }
+    }
+
+    if (showWakeWordDialog) {
+        WakeWordAndVoiceprintDialog(
+            uiState = uiState,
+            onDismiss = { showWakeWordDialog = false },
+            onUpdateSettings = { viewModel.updateSettings(it) },
+            onEnrollVoiceprint = { viewModel.enrollUserVoiceprint() },
+            onClearVoiceprint = { viewModel.clearUserVoiceprint() }
+        )
+    }
+
+    activeMapPreviewData?.let { mapPreview ->
+        InAppMapPreviewDialog(
+            previewData = mapPreview,
+            onDismiss = { activeMapPreviewData = null },
+            onLaunchGoogleMapsNavigation = { navUrl ->
+                activeMapPreviewData = null
+                runCatching {
+                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(navUrl)).apply {
+                        setPackage("com.google.android.apps.maps")
+                    }
+                    try {
+                        context.startActivity(intent)
+                    } catch (_: Exception) {
+                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(navUrl)))
+                    }
+                }
+            }
+        )
     }
 
     if (showNotebookDialog) {
@@ -810,6 +892,8 @@ private fun LiveConversationTab(
     currentMode: AppMode,
     onOpenModeConfigSheet: () -> Unit,
     onOpenNotebookDialog: () -> Unit,
+    onOpenWakeWordDialog: () -> Unit,
+    onOpenMapPreview: (MapPreviewData) -> Unit,
     onSelectTargetLanguage: (String) -> Unit,
     onSelectSecondaryLanguage: (String) -> Unit,
     onUpdateSettings: (AppSettings) -> Unit,
@@ -845,6 +929,7 @@ private fun LiveConversationTab(
             currentMode = currentMode,
             onOpenModeConfigSheet = onOpenModeConfigSheet,
             onOpenNotebookDialog = onOpenNotebookDialog,
+            onOpenWakeWordDialog = onOpenWakeWordDialog,
             onSelectTargetLanguage = onSelectTargetLanguage,
             onSelectSecondaryLanguage = onSelectSecondaryLanguage,
             onUpdateSettings = onUpdateSettings,
@@ -886,7 +971,10 @@ private fun LiveConversationTab(
                         onOpenUrl = { url ->
                             runCatching {
                                 val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
-                                    if (url.contains("google.com/maps") || url.contains("maps.app.goo.gl")) {
+                                    if (url.contains("google.com/maps") ||
+                                        url.contains("maps.app.goo.gl") ||
+                                        url.startsWith("google.navigation:")
+                                    ) {
                                         setPackage("com.google.android.apps.maps")
                                     }
                                 }
@@ -897,6 +985,7 @@ private fun LiveConversationTab(
                                 }
                             }
                         },
+                        onOpenMapPreview = onOpenMapPreview,
                         onPlayVoiceClip = onPlayMessageVoiceClip,
                         onSaveToNotebook = { onSaveMessageToNotebook(msg) }
                     )
@@ -932,6 +1021,7 @@ private fun SlimContextualModeHeaderBar(
     currentMode: AppMode,
     onOpenModeConfigSheet: () -> Unit,
     onOpenNotebookDialog: () -> Unit,
+    onOpenWakeWordDialog: () -> Unit,
     onSelectTargetLanguage: (String) -> Unit,
     onSelectSecondaryLanguage: (String) -> Unit,
     onUpdateSettings: (AppSettings) -> Unit,
@@ -969,6 +1059,33 @@ private fun SlimContextualModeHeaderBar(
                             color = Color(0xFFE2E8F0)
                         )
                     }
+                }
+
+                // Hands-Free Wake Word + Voiceprint Quick Config Chip ("hey Luna 我需要你")
+                val hasVoiceprint = settings.wakeWordVoiceprintData.isNotBlank()
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = if (settings.wakeWordEnabled) AmberTutorAccent.copy(alpha = 0.20f) else Color(0xFF161F30),
+                    border = BorderStroke(
+                        0.5.dp,
+                        if (settings.wakeWordEnabled) AmberTutorAccent.copy(alpha = 0.7f) else Color.White.copy(alpha = 0.14f)
+                    ),
+                    modifier = Modifier.clickable { onOpenWakeWordDialog() }
+                ) {
+                    Text(
+                        text = when {
+                            settings.wakeWordEnabled && hasVoiceprint ->
+                                "🎧 聲紋喚醒: «${settings.wakeWordPhrase}»"
+                            settings.wakeWordEnabled ->
+                                "🎧 喚醒待機: «${settings.wakeWordPhrase}»"
+                            else ->
+                                "🎧 免碰喚醒: 關 (點擊設定)"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = if (settings.wakeWordEnabled) Color(0xFFFDE68A) else Color(0xFF94A3B8),
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                    )
                 }
 
                 // GPS & Google Maps Tool Quick Toggle Chip
@@ -1275,6 +1392,7 @@ private fun ModeConfigBottomSheetContent(
     onSelectTargetLanguage: (String) -> Unit,
     onSelectSecondaryLanguage: (String) -> Unit,
     onOpenNotebook: () -> Unit,
+    onOpenWakeWordDialog: () -> Unit,
     onOpenFullSettings: () -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -1358,6 +1476,41 @@ private fun ModeConfigBottomSheetContent(
                         Switch(
                             checked = settings.locationToolsEnabled,
                             onCheckedChange = { onUpdateSettings(settings.copy(locationToolsEnabled = it)) }
+                        )
+                    }
+                }
+
+                // Hands-Free Wake Word ("hey Luna 我需要你") & Auto-Hangup Card
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = Color(0xFF161F30),
+                    border = BorderStroke(0.5.dp, AmberTutorAccent.copy(alpha = 0.45f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onOpenWakeWordDialog() }
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "🎧 免碰手機語音喚醒 («${settings.wakeWordPhrase}») ＋ 聲紋辨識鎖",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFFDE68A)
+                            )
+                            Text(
+                                text = "待機 $0 API 費用 · 支援本人聲紋鎖、導航自動掛斷、說「掰掰」免手觸掛斷與四道防誤觸保護",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFF94A3B8)
+                            )
+                        }
+                        Text(
+                            text = "設定 ➔",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = AmberTutorAccent
                         )
                     }
                 }
@@ -2826,6 +2979,7 @@ private fun ChatMessageItem(
     isSavedInNotebook: Boolean,
     onCopyText: (String) -> Unit,
     onOpenUrl: (String) -> Unit,
+    onOpenMapPreview: (MapPreviewData) -> Unit,
     onPlayVoiceClip: (String, Float) -> Unit,
     onSaveToNotebook: () -> Unit
 ) {
@@ -3199,11 +3353,12 @@ private fun ChatMessageItem(
                     )
                 }
 
-                // Prominent Google Maps Navigation / Nearby Map Action Pills (Always visible right on the bubble!)
+                // Prominent Google Maps Navigation / In-App Map Preview Action Cards (Always visible right on the bubble!)
                 val mapSources = remember(message.sources) {
                     message.sources.filter { src ->
                         src.url.contains("google.com/maps") ||
                                 src.url.contains("maps.app.goo.gl") ||
+                                src.snippet.startsWith("MAP_PREVIEW|") ||
                                 src.title.startsWith("🗺️") ||
                                 src.title.startsWith("📍")
                     }
@@ -3211,46 +3366,106 @@ private fun ChatMessageItem(
                 if (mapSources.isNotEmpty()) {
                     Spacer(modifier = Modifier.height(8.dp))
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        mapSources.take(3).forEach { mapSrc ->
+                        mapSources.take(4).forEach { mapSrc ->
+                            val previewData = remember(mapSrc) {
+                                parseMapPreviewSnippet(mapSrc.snippet, mapSrc.title, mapSrc.url)
+                            }
                             Surface(
                                 shape = RoundedCornerShape(12.dp),
-                                color = EmeraldAccent.copy(alpha = 0.18f),
+                                color = Color(0xFF0E1B2E).copy(alpha = 0.92f),
                                 border = BorderStroke(1.dp, EmeraldAccent.copy(alpha = 0.65f)),
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clickable {
-                                        if (mapSrc.url.isNotBlank()) {
+                                        if (previewData != null) {
+                                            onOpenMapPreview(previewData)
+                                        } else if (mapSrc.url.isNotBlank()) {
                                             onOpenUrl(mapSrc.url)
                                         }
                                     }
                             ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Place,
-                                        contentDescription = "開啟 Google Maps",
-                                        tint = EmeraldAccent,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text(
-                                        text = mapSrc.title.ifBlank { "🗺️ 開啟 Google Maps 導航" },
-                                        style = MaterialTheme.typography.labelMedium,
-                                        fontWeight = FontWeight.Bold,
-                                        color = Color(0xFFD1FAE5),
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        text = "開啟地圖 ➔",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontWeight = FontWeight.Bold,
-                                        color = EmeraldAccent
-                                    )
+                                Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp)) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Place,
+                                            contentDescription = "地點與導航",
+                                            tint = EmeraldAccent,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = mapSrc.title.ifBlank { "🗺️ 開啟 Google Maps 導航" },
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color(0xFFD1FAE5),
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                    }
+
+                                    if (previewData != null && previewData.address.isNotBlank()) {
+                                        Text(
+                                            text = previewData.address,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = Color(0xFF94A3B8),
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.padding(top = 2.dp, start = 24.dp)
+                                        )
+                                    }
+
+                                    Spacer(modifier = Modifier.height(6.dp))
+
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        if (previewData != null) {
+                                            Surface(
+                                                shape = RoundedCornerShape(8.dp),
+                                                color = CyanAccent.copy(alpha = 0.18f),
+                                                border = BorderStroke(0.5.dp, CyanAccent.copy(alpha = 0.6f)),
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .clickable { onOpenMapPreview(previewData) }
+                                            ) {
+                                                Text(
+                                                    text = "🗺️ App 內看地圖",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = Color(0xFFBAE6FD),
+                                                    textAlign = TextAlign.Center,
+                                                    modifier = Modifier.padding(vertical = 6.dp)
+                                                )
+                                            }
+                                        }
+
+                                        Surface(
+                                            shape = RoundedCornerShape(8.dp),
+                                            color = EmeraldAccent.copy(alpha = 0.22f),
+                                            border = BorderStroke(0.5.dp, EmeraldAccent.copy(alpha = 0.7f)),
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .clickable {
+                                                    if (mapSrc.url.isNotBlank()) {
+                                                        onOpenUrl(mapSrc.url)
+                                                    }
+                                                }
+                                        ) {
+                                            Text(
+                                                text = "🚀 直接導航 ➔",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontWeight = FontWeight.Bold,
+                                                color = EmeraldAccent,
+                                                textAlign = TextAlign.Center,
+                                                modifier = Modifier.padding(vertical = 6.dp)
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -3490,7 +3705,8 @@ private fun SettingsAndModelFetchTab(
     uiState: UiState,
     onUpdateSettings: (AppSettings) -> Unit,
     onFetchModels: () -> Unit,
-    onOpenMemoryHub: () -> Unit
+    onOpenMemoryHub: () -> Unit,
+    onOpenWakeWordDialog: () -> Unit
 ) {
     val s = uiState.settings
     val scrollState = rememberScrollState()
@@ -3630,6 +3846,16 @@ private fun SettingsAndModelFetchTab(
                     onValueChange = { onUpdateSettings(s.copy(linkupApiKey = it)) },
                     label = { Text("Linkup Web Search API Key (api.linkup.so)") },
                     placeholder = { Text("輸入你的 Linkup API Key...") },
+                    singleLine = true,
+                    visualTransformation = visualTrans,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                OutlinedTextField(
+                    value = s.googleMapsApiKey,
+                    onValueChange = { onUpdateSettings(s.copy(googleMapsApiKey = it)) },
+                    label = { Text("Google Maps Platform API Key (選填，啟用 Places API 精準星等/營業狀態/座標)") },
+                    placeholder = { Text("AIza... (每月享免費額度，未填則自動使用手機 GPS + Linkup 搜尋)") },
                     singleLine = true,
                     visualTransformation = visualTrans,
                     modifier = Modifier.fillMaxWidth()
@@ -3819,6 +4045,40 @@ private fun SettingsAndModelFetchTab(
                     Switch(
                         checked = s.locationToolsEnabled,
                         onCheckedChange = { onUpdateSettings(s.copy(locationToolsEnabled = it)) }
+                    )
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("🧭 啟動 Google Maps 導航後自動結束語音通話", fontWeight = FontWeight.Medium, color = Color.White)
+                        Text(
+                            "開啟後，當 AI 自動為你跳轉 Google Maps 開始導航時，會在講完確認語後（約 2.8 秒）自動掛斷 Live Chat，避免與導航語音搶麥克風或浪費額度",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFF94A3B8)
+                        )
+                    }
+                    Switch(
+                        checked = s.autoEndCallOnNavigation,
+                        onCheckedChange = { onUpdateSettings(s.copy(autoEndCallOnNavigation = it)) }
+                    )
+                }
+
+                Button(
+                    onClick = onOpenWakeWordDialog,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = AmberTutorAccent,
+                        contentColor = Color(0xFF06101E)
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Default.RecordVoiceOver, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "🎧 設定免碰語音喚醒 («${s.wakeWordPhrase}») ＆ 本人聲紋辨識鎖",
+                        fontWeight = FontWeight.Bold
                     )
                 }
 
@@ -4182,4 +4442,463 @@ private fun copyToClipboard(context: Context, label: String, text: String) {
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     val clip = ClipData.newPlainText(label, text)
     clipboard.setPrimaryClip(clip)
+}
+
+@Composable
+private fun WakeWordAndVoiceprintDialog(
+    uiState: UiState,
+    onDismiss: () -> Unit,
+    onUpdateSettings: (AppSettings) -> Unit,
+    onEnrollVoiceprint: () -> Unit,
+    onClearVoiceprint: () -> Unit
+) {
+    val settings = uiState.settings
+    var wakePhraseText by remember(settings.wakeWordPhrase) {
+        mutableStateOf(settings.wakeWordPhrase.ifBlank { "hey Luna 我需要你" })
+    }
+    val enrolledProfile = remember(settings.wakeWordVoiceprintData) {
+        WakeWordManager.VoiceprintProfile.fromJson(settings.wakeWordVoiceprintData)
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xFF111827),
+        titleContentColor = Color.White,
+        textContentColor = Color(0xFFE2E8F0),
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.RecordVoiceOver,
+                    contentDescription = null,
+                    tint = AmberTutorAccent,
+                    modifier = Modifier.size(22.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "🎧 免碰語音喚醒 ＆ 本人聲紋鎖",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                // 1. Standby Enable Switch ($0 OpenAI cost while waiting)
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = if (settings.wakeWordEnabled) AmberTutorAccent.copy(alpha = 0.18f) else Color(0xFF1E293B),
+                    border = BorderStroke(
+                        1.dp,
+                        if (settings.wakeWordEnabled) AmberTutorAccent else Color.White.copy(alpha = 0.1f)
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            onUpdateSettings(
+                                settings.copy(
+                                    wakeWordEnabled = !settings.wakeWordEnabled,
+                                    wakeWordPhrase = wakePhraseText.trim().ifBlank { "hey Luna 我需要你" }
+                                )
+                            )
+                        }
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "啟用免碰手機語音喚醒待機（待機 $0 API 費用）",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                            Text(
+                                text = uiState.wakeWordStandbyStatus,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (uiState.isWakeWordStandbyActive) Color(0xFFFDE68A) else Color(0xFF94A3B8)
+                            )
+                        }
+                        Switch(
+                            checked = settings.wakeWordEnabled,
+                            onCheckedChange = { enabled ->
+                                onUpdateSettings(
+                                    settings.copy(
+                                        wakeWordEnabled = enabled,
+                                        wakeWordPhrase = wakePhraseText.trim().ifBlank { "hey Luna 我需要你" }
+                                    )
+                                )
+                            }
+                        )
+                    }
+                }
+
+                // 2. Wake Phrase Input (Default: "hey Luna 我需要你")
+                OutlinedTextField(
+                    value = wakePhraseText,
+                    onValueChange = {
+                        wakePhraseText = it
+                        onUpdateSettings(settings.copy(wakeWordPhrase = it.trim().ifBlank { "hey Luna 我需要你" }))
+                    },
+                    label = { Text("🗣️ 專屬喚醒詞 (預設：hey Luna 我需要你)") },
+                    placeholder = { Text("hey Luna 我需要你") },
+                    singleLine = true,
+                    trailingIcon = {
+                        if (wakePhraseText != "hey Luna 我需要你") {
+                            TextButton(
+                                onClick = {
+                                    wakePhraseText = "hey Luna 我需要你"
+                                    onUpdateSettings(settings.copy(wakeWordPhrase = "hey Luna 我需要你"))
+                                }
+                            ) {
+                                Text("預設", color = CyanAccent, style = MaterialTheme.typography.labelSmall)
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                // 3. On-Device Acoustic Voiceprint Lock Card
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color(0xFF161F30),
+                    border = BorderStroke(
+                        1.dp,
+                        if (enrolledProfile != null && settings.wakeWordVoiceprintEnabled) EmeraldAccent.copy(alpha = 0.6f)
+                        else VioletAccent.copy(alpha = 0.45f)
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "🔒 本地端本人聲紋辨識鎖 (Voiceprint Lock)",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                                Text(
+                                    text = if (enrolledProfile != null) {
+                                        "✅ 已錄製 ${enrolledProfile.sampleCount} 次本人聲紋樣本（基頻約 ${enrolledProfile.meanPitchHz.toInt()} Hz）— 僅本人聲線說出喚醒詞才會開啟"
+                                    } else {
+                                        "尚未錄製本人聲紋樣本（建議錄製 2～3 次以獲得最佳防旁人誤觸效果）"
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (enrolledProfile != null) Color(0xFFA7F3D0) else Color(0xFFCBD5E1)
+                                )
+                            }
+                            Switch(
+                                checked = settings.wakeWordVoiceprintEnabled,
+                                onCheckedChange = {
+                                    onUpdateSettings(settings.copy(wakeWordVoiceprintEnabled = it))
+                                }
+                            )
+                        }
+
+                        if (uiState.voiceprintStatusMessage.isNotBlank()) {
+                            Text(
+                                text = uiState.voiceprintStatusMessage,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = AmberTutorAccent,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Button(
+                                onClick = onEnrollVoiceprint,
+                                enabled = !uiState.isEnrollingVoiceprint,
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = CyanAccent,
+                                    contentColor = Color(0xFF06101E)
+                                ),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                if (uiState.isEnrollingVoiceprint) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(15.dp),
+                                        strokeWidth = 2.dp,
+                                        color = Color(0xFF06101E)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("請說「${wakePhraseText}」...", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                } else {
+                                    Icon(Icons.Default.Mic, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = if (enrolledProfile == null) "錄製本人聲紋 (3秒)" else "追加取樣強化聲紋",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 12.sp
+                                    )
+                                }
+                            }
+
+                            if (enrolledProfile != null) {
+                                OutlinedButton(
+                                    onClick = onClearVoiceprint,
+                                    border = BorderStroke(1.dp, RoseDanger.copy(alpha = 0.6f))
+                                ) {
+                                    Text("重設", color = RoseDanger, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 4. Hands-Free Auto-Hangup & 4-Layer Safety Net Card
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color(0xFF161F30),
+                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.1f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "🛡️ 免碰手機自動掛斷 ＆ 四道防誤觸保護網",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = EmeraldAccent
+                        )
+
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "🧭 跳轉 Google Maps 導航後自動掛斷通話",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                                Text(
+                                    text = "導航開啟後約 2.8 秒自動結束 Live Chat，不與導航語音搶麥克風",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFF94A3B8)
+                                )
+                            }
+                            Switch(
+                                checked = settings.autoEndCallOnNavigation,
+                                onCheckedChange = {
+                                    onUpdateSettings(settings.copy(autoEndCallOnNavigation = it))
+                                }
+                            )
+                        }
+
+                        Text(
+                            text = "• 語音道別掛斷：通話中說「掰掰 / 再見 / 先這樣 / 結束通話」自動掛斷\n" +
+                                    "• 第 1 道（${settings.wakeWordFirstUtteranceTimeoutSec} 秒首句驗證窗）：喚醒後若無有效指令立即掛斷\n" +
+                                    "• 第 2 道（AI 旁人閒聊辨識）：誤聽到旁人聊天半截話時 AI 主動秒掛斷\n" +
+                                    "• 第 3 道（${settings.wakeWordIdleTimeoutSec} 秒無聲閒置掛斷）：對話停頓超過 ${settings.wakeWordIdleTimeoutSec} 秒自動掛斷\n" +
+                                    "• 第 4 道（${settings.wakeWordMaxDurationSec} 秒單通安全上限）：滿 ${settings.wakeWordMaxDurationSec - 15} 秒主動語音詢問是否繼續",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFFCBD5E1),
+                            lineHeight = 17.sp
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onDismiss,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = EmeraldAccent,
+                    contentColor = Color(0xFF042F2E)
+                )
+            ) {
+                Text("完成並套用", fontWeight = FontWeight.Bold)
+            }
+        }
+    )
+}
+
+@Composable
+private fun InAppMapPreviewDialog(
+    previewData: MapPreviewData,
+    onDismiss: () -> Unit,
+    onLaunchGoogleMapsNavigation: (String) -> Unit
+) {
+    val htmlContent = remember(previewData) {
+        val lat = previewData.lat
+        val lon = previewData.lon
+        val uLat = previewData.userLat
+        val uLon = previewData.userLon
+        val safeName = previewData.name.replace("'", "\\'").replace("\"", "&quot;")
+        val safeMeta = previewData.meta.replace("'", "\\'").replace("\"", "&quot;")
+        val safeAddr = previewData.address.replace("'", "\\'").replace("\"", "&quot;")
+
+        """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+            <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+            <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+            <style>
+                html, body, #map { margin: 0; padding: 0; width: 100%; height: 100%; background: #0f172a; font-family: sans-serif; }
+                .leaflet-popup-content-wrapper { background: #1e293b; color: #f8fafc; border-radius: 10px; border: 1px solid #38bdf8; }
+                .leaflet-popup-tip { background: #1e293b; }
+            </style>
+        </head>
+        <body>
+            <div id="map"></div>
+            <script>
+                var destLat = $lat;
+                var destLon = $lon;
+                var map = L.map('map').setView([destLat, destLon], 16);
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                    maxZoom: 19,
+                    attribution: '© OpenStreetMap'
+                }).addTo(map);
+
+                var destMarker = L.marker([destLat, destLon]).addTo(map);
+                destMarker.bindPopup("<b>📍 $safeName</b><br/><span style='color:#34d399;font-size:12px;'>$safeMeta</span><br/><span style='color:#cbd5e1;font-size:11px;'>$safeAddr</span>").openPopup();
+
+                ${
+                    if (uLat != null && uLon != null) {
+                        """
+                        var uLat = $uLat;
+                        var uLon = $uLon;
+                        var userCircle = L.circleMarker([uLat, uLon], {
+                            radius: 8,
+                            fillColor: '#38bdf8',
+                            color: '#ffffff',
+                            weight: 2,
+                            opacity: 1,
+                            fillOpacity: 0.9
+                        }).addTo(map).bindPopup("<b>🕺 你的目前位置</b>");
+
+                        var routeLine = L.polyline([[uLat, uLon], [destLat, destLon]], {
+                            color: '#10b981',
+                            weight: 4,
+                            dashArray: '8, 8'
+                        }).addTo(map);
+
+                        map.fitBounds(routeLine.getBounds(), { padding: [42, 42], maxZoom: 17 });
+                        """
+                    } else ""
+                }
+            </script>
+        </body>
+        </html>
+        """.trimIndent()
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xFF0F172A),
+        titleContentColor = Color.White,
+        textContentColor = Color(0xFFE2E8F0),
+        title = {
+            Column {
+                Text(
+                    text = "🗺️ ${previewData.name}",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White
+                )
+                if (previewData.meta.isNotBlank()) {
+                    Text(
+                        text = previewData.meta,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = EmeraldAccent,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = Color(0xFF090E1A),
+                    border = BorderStroke(1.dp, CyanAccent.copy(alpha = 0.45f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(300.dp)
+                ) {
+                    AndroidView(
+                        factory = { ctx ->
+                            WebView(ctx).apply {
+                                settings.javaScriptEnabled = true
+                                settings.domStorageEnabled = true
+                                webViewClient = WebViewClient()
+                                loadDataWithBaseURL(
+                                    "https://openstreetmap.org",
+                                    htmlContent,
+                                    "text/html",
+                                    "UTF-8",
+                                    null
+                                )
+                            }
+                        },
+                        update = { webView ->
+                            webView.loadDataWithBaseURL(
+                                "https://openstreetmap.org",
+                                htmlContent,
+                                "text/html",
+                                "UTF-8",
+                                null
+                            )
+                        },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+
+                if (previewData.address.isNotBlank()) {
+                    Text(
+                        text = "📍 地址：${previewData.address}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFFCBD5E1)
+                    )
+                }
+                Text(
+                    text = "💡 你目前仍在 App 內，語音對話不會中斷！若確定要前往，可點擊下方按鈕直接跳轉 Google Maps 開始語音導航。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFF94A3B8)
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onLaunchGoogleMapsNavigation(previewData.navUrl) },
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = EmeraldAccent,
+                    contentColor = Color(0xFF042F2E)
+                )
+            ) {
+                Icon(Icons.Default.Navigation, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("🚀 跳轉 Google Maps 導航", fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("關閉預覽（繼續聊天）", color = CyanAccent)
+            }
+        }
+    )
 }

@@ -37,6 +37,7 @@ interface LiveSessionListener {
     fun onTurnCompleted()
     fun onMicLevelChanged(level: Float)
     fun onVoiceUsageUpdated(seconds: Int)
+    fun onAutoHangupRequested(reason: String, delayMs: Long = 0L)
     fun onError(message: String)
 }
 
@@ -98,9 +99,145 @@ class LiveSessionManager(
     @Volatile
     private var lastBackendItemId: String = ""
 
+    @Volatile
+    private var isWakeWordTriggeredSession: Boolean = false
+    @Volatile
+    private var hasFirstUserUtteranceArrived: Boolean = false
+    @Volatile
+    private var lastActivityWallMs: Long = 0L
+    @Volatile
+    private var currentTurnUserTextAccumulated: String = ""
+
+    private var firstUtteranceGuardJob: Job? = null
+    private var idleSilenceGuardJob: Job? = null
+    private var maxWakeDurationGuardJob: Job? = null
+    private var voiceGoodbyeCheckJob: Job? = null
+
     private var tutorCoachDebounceJob: Job? = null
     private val coachedVoiceTextByTurn = java.util.concurrent.ConcurrentHashMap<Int, String>()
     private var activeNotebookEntries: List<TutorNotebookEntry> = emptyList()
+
+    private fun cancelHandsFreeSafetyGuards() {
+        firstUtteranceGuardJob?.cancel()
+        firstUtteranceGuardJob = null
+        idleSilenceGuardJob?.cancel()
+        idleSilenceGuardJob = null
+        maxWakeDurationGuardJob?.cancel()
+        maxWakeDurationGuardJob = null
+        voiceGoodbyeCheckJob?.cancel()
+        voiceGoodbyeCheckJob = null
+    }
+
+    private fun startHandsFreeSafetyGuardsIfNeeded() {
+        cancelHandsFreeSafetyGuards()
+        lastActivityWallMs = System.currentTimeMillis()
+
+        // Guard 1: 8-second First Utterance Verification Window (when woken by "hey Luna 我需要你")
+        if (isWakeWordTriggeredSession) {
+            val firstTimeoutSec = activeSettings.wakeWordFirstUtteranceTimeoutSec.coerceIn(4, 30)
+            firstUtteranceGuardJob = scope.launch {
+                // Give +2.5s buffer for the AI's short "我在，請說！" greeting
+                delay(firstTimeoutSec * 1000L + 2500L)
+                if (sessionStarted && !isClosing && !hasFirstUserUtteranceArrived) {
+                    listener.onAutoHangupRequested(
+                        reason = "🛡️ 語音喚醒後 ${firstTimeoutSec} 秒內未收到指令（防誤觸保護），已自動掛斷並退回 $0 待機",
+                        delayMs = 0L
+                    )
+                }
+            }
+        }
+
+        // Guard 3: 25-second Silence / Idle Auto-Hangup (active for wake-word sessions or when wake word standby is enabled)
+        if (isWakeWordTriggeredSession || activeSettings.wakeWordEnabled) {
+            val idleTimeoutSec = activeSettings.wakeWordIdleTimeoutSec.coerceIn(10, 120)
+            idleSilenceGuardJob = scope.launch {
+                while (isActive && sessionStarted && !isClosing) {
+                    delay(2000L)
+                    val now = System.currentTimeMillis()
+                    val lastActive = maxOf(
+                        lastActivityWallMs,
+                        lastUserDeltaWallMs,
+                        lastVoiceDeltaWallMs,
+                        lastDelegationDoneWallMs
+                    )
+                    if (!isDelegationActive && !isToolCallRunning && now - lastActive > idleTimeoutSec * 1000L) {
+                        listener.onAutoHangupRequested(
+                            reason = "🔇 連續 ${idleTimeoutSec} 秒無對話互動，已自動結束通話並退回待機",
+                            delayMs = 0L
+                        )
+                        break
+                    }
+                }
+            }
+        }
+
+        // Guard 4: 90-second Max Single Hands-Free Call Cap with 75s Spoken Confirmation
+        if (isWakeWordTriggeredSession) {
+            val maxDurationSec = activeSettings.wakeWordMaxDurationSec.coerceIn(30, 600)
+            maxWakeDurationGuardJob = scope.launch {
+                val warnAtSec = (maxDurationSec - 15).coerceAtLeast(15)
+                delay(warnAtSec * 1000L)
+                if (!sessionStarted || isClosing) return@launch
+                val warnTimestamp = System.currentTimeMillis()
+                injectVisionResultIntoActiveVoiceSession(
+                    "[免持安全提示] 語音喚醒通話已達 $warnAtSec 秒。請簡短溫和地詢問使用者：「請問還需要繼續通話嗎？若沒有其他問題，我將自動幫您掛斷並退回待機。」"
+                )
+                delay(15_000L)
+                if (!sessionStarted || isClosing) return@launch
+                if (lastUserDeltaWallMs < warnTimestamp && !isDelegationActive && !isToolCallRunning) {
+                    listener.onAutoHangupRequested(
+                        reason = "⏱️ 免持通話已達 ${maxDurationSec} 秒安全上限，已自動掛斷保護 API 額度",
+                        delayMs = 0L
+                    )
+                }
+            }
+        }
+    }
+
+    private fun onUserSpeechTranscriptObserved(delta: String) {
+        hasFirstUserUtteranceArrived = true
+        lastActivityWallMs = System.currentTimeMillis()
+        firstUtteranceGuardJob?.cancel()
+        currentTurnUserTextAccumulated += delta
+
+        voiceGoodbyeCheckJob?.cancel()
+        voiceGoodbyeCheckJob = scope.launch {
+            delay(900L)
+            val text = currentTurnUserTextAccumulated.trim().lowercase()
+            if (text.isEmpty() || !sessionStarted || isClosing) return@launch
+
+            // False-wake / bystander rejection phrases -> hang up immediately
+            val falseWakePhrases = listOf(
+                "我沒叫你", "沒叫你", "不是叫你", "不是跟你講", "不是跟你說", "認錯人", "誤觸"
+            )
+            val matchedFalseWake = falseWakePhrases.firstOrNull { text.contains(it) }
+            if (matchedFalseWake != null) {
+                listener.onAutoHangupRequested(
+                    reason = "🛡️ 偵測到「$matchedFalseWake」，已立即自動掛斷並退回待機",
+                    delayMs = 300L
+                )
+                return@launch
+            }
+
+            // Explicit voice hangup / goodbye commands -> let AI say a brief goodbye (~2.6s) then auto-hangup
+            val hangupPhrases = listOf(
+                "結束通話", "掛斷通話", "關閉通話", "結束對話", "幫我掛斷", "掛斷", "掛掉",
+                "先這樣掰掰", "先這樣拜拜", "先這樣再見", "不用了掰掰", "謝謝掰掰", "謝謝拜拜",
+                "謝謝再見", "沒事了謝謝", "先聊到這", "掰掰", "拜拜", "再見", "bye bye", "goodbye", "hang up"
+            )
+            // Only trigger on standalone/clear goodbye or explicit hangup command (avoid triggering on long unrelated sentences)
+            val matchedGoodbye = hangupPhrases.firstOrNull { kw ->
+                text == kw || text.endsWith(kw) || text.contains("結束通話") || text.contains("掛斷") ||
+                        (text.length <= 18 && text.contains(kw))
+            }
+            if (matchedGoodbye != null) {
+                listener.onAutoHangupRequested(
+                    reason = "👋 偵測到語音結束指令（「$matchedGoodbye」），AI 道別後自動掛斷",
+                    delayMs = 2700L
+                )
+            }
+        }
+    }
 
     private val audioClipLock = Any()
     private val currentTurnAudioBuffer = java.io.ByteArrayOutputStream(96000)
@@ -173,6 +310,7 @@ class LiveSessionManager(
         delegationCompletedInTurn = false
         needsVoiceParagraphBreak = false
         lastBackendItemId = ""
+        currentTurnUserTextAccumulated = ""
     }
 
     private fun scheduleTutorTurnCoachAnalysis(
@@ -218,13 +356,18 @@ class LiveSessionManager(
         priorMessages: List<ChatMessage>,
         notebookEntries: List<TutorNotebookEntry> = emptyList(),
         conversationSnapshotProvider: () -> List<ChatMessage>,
-        useSpeakerphone: Boolean = true
+        useSpeakerphone: Boolean = true,
+        isWakeWordSession: Boolean = false
     ) {
         disconnectImmediate()
         activeSettings = settings
         activeNotebookEntries = notebookEntries
         sessionStarted = false
         isClosing = false
+        isWakeWordTriggeredSession = isWakeWordSession
+        hasFirstUserUtteranceArrived = false
+        lastActivityWallMs = System.currentTimeMillis()
+        currentTurnUserTextAccumulated = ""
 
         sessionEpochId = UUID.randomUUID().toString().take(6)
         val maxPriorTurn = priorMessages.maxOfOrNull { it.turnIndex } ?: 0
@@ -346,6 +489,7 @@ class LiveSessionManager(
                         sendRealtimeSessionUpdate(webSocket, settings)
                         sessionStarted = true
                         engine.start(useSpeakerphone = useSpeakerphone)
+                        startHandsFreeSafetyGuardsIfNeeded()
                         listener.onConnectionStateChanged(
                             ConnectionState.LIVE,
                             "已連線：$frontModel ⇄ ${settings.backendBrainModel}"
@@ -625,6 +769,7 @@ class LiveSessionManager(
                     useSpeakerphone = useSpeakerphone,
                     isSimultaneousTranslation = false
                 )
+                startHandsFreeSafetyGuardsIfNeeded()
                 val statusMsg = when {
                     isTutorMode -> {
                         val langShort = AppSettings.tutorLanguageLabel(activeSettings.tutorTargetLanguage).substringBefore(" (")
@@ -634,14 +779,26 @@ class LiveSessionManager(
                         val langLabel = AppSettings.languageLabel(activeSettings.translationTargetLanguage)
                         "🌐 智慧詞庫口譯中：自動偵測語言 ➔ $langLabel"
                     }
+                    isWakeWordTriggeredSession -> {
+                        "🗣️ 語音喚醒通話中 («${activeSettings.wakeWordPhrase}») — 說「掰掰/結束通話」自動掛斷"
+                    }
                     else -> {
                         "通話中：${settings.frontendVoiceModel} ⇄ ${settings.backendBrainModel}"
                     }
                 }
                 listener.onConnectionStateChanged(ConnectionState.LIVE, statusMsg)
 
-                // In Tutor Mode, if starting a fresh session, let the AI Tutor warmly greet the user first!
-                if (isTutorMode && conversationSnapshotProvider().isEmpty()) {
+                // If woken up hands-free via wake word ("hey Luna 我需要你"), let Luna greet briefly ("我在，請說！")
+                if (isWakeWordTriggeredSession && !promptInterpreter) {
+                    scope.launch {
+                        delay(250)
+                        if (sessionStarted && !isClosing) {
+                            injectVisionResultIntoActiveVoiceSession(
+                                "[免持語音喚醒啟動] 使用者剛才說出喚醒詞「${activeSettings.wakeWordPhrase}」喚醒了你。請先用極簡短親切的一句話（例如：「我在，請說！」）回應使用者並等待他的指令。若接下來聽到的第一句話明顯是旁邊其他人彼此聊天的半截話、並非對你下達指令，請保持安靜並立即呼叫 end_live_voice_session(reason='bystander_false_wake') 掛斷！"
+                            )
+                        }
+                    }
+                } else if (isTutorMode && conversationSnapshotProvider().isEmpty()) {
                     scope.launch {
                         delay(350)
                         if (sessionStarted && !isClosing) {
@@ -690,6 +847,7 @@ class LiveSessionManager(
 
                     lastUserDeltaWallMs = now
                     userCharsInTurn += delta.length
+                    onUserSpeechTranscriptObserved(delta)
 
                     val turnIdx = currentTurnIndex
                     val streamKey = "turn_${sessionEpochId}_${turnIdx}_user"
@@ -1022,7 +1180,8 @@ class LiveSessionManager(
                             toolName = fnName,
                             argsJson = argsJson,
                             linkupApiKey = settings.linkupApiKey,
-                            linkupDepth = settings.linkupSearchDepth
+                            linkupDepth = settings.linkupSearchDepth,
+                            googleMapsApiKey = settings.googleMapsApiKey
                         )
                         locRes.linkupResult?.let { listener.onSearchCardAdded(it, turnIdx) }
                         locRes.mapActionSource?.let { mapSource ->
@@ -1398,6 +1557,7 @@ class LiveSessionManager(
                     val formatted = if (userCharsInTurn > 0) " $transcript" else transcript
                     userCharsInTurn += transcript.length
                     lastUserDeltaWallMs = now
+                    onUserSpeechTranscriptObserved(transcript)
 
                     val turnIdx = currentTurnIndex
                     listener.onTranscriptDelta(
@@ -1534,7 +1694,8 @@ class LiveSessionManager(
                             toolName = fnName,
                             argsJson = argsJson,
                             linkupApiKey = settings.linkupApiKey,
-                            linkupDepth = settings.linkupSearchDepth
+                            linkupDepth = settings.linkupSearchDepth,
+                            googleMapsApiKey = settings.googleMapsApiKey
                         )
                         locRes.linkupResult?.let { listener.onSearchCardAdded(it, turnIdx) }
                         locRes.mapActionSource?.let { mapSource ->
@@ -1855,6 +2016,7 @@ class LiveSessionManager(
     fun disconnectImmediate() {
         isClosing = false
         sessionStarted = false
+        cancelHandsFreeSafetyGuards()
         tutorCoachDebounceJob?.cancel()
         audioClipSaveDebounceJob?.cancel()
         synchronized(audioClipLock) {
