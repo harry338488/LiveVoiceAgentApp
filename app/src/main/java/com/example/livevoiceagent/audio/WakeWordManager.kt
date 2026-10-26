@@ -21,9 +21,11 @@ import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import androidx.core.content.ContextCompat
+import com.example.livevoiceagent.model.AppSettings
 import kotlinx.coroutines.*
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.Locale
 import kotlin.math.*
 
 data class VoiceprintProfile(
@@ -44,6 +46,8 @@ data class VoiceprintProfile(
     }.toString()
 
     companion object {
+        fun fromJson(jsonStr: String): VoiceprintProfile? = fromJsonString(jsonStr)
+
         fun fromJsonString(jsonStr: String): VoiceprintProfile? {
             if (jsonStr.isBlank()) return null
             return runCatching {
@@ -66,8 +70,8 @@ data class VoiceprintProfile(
 
 class WakeWordManager(
     private val context: Context,
-    private val onStatusChanged: (isListening: Boolean, statusText: String) -> Unit,
-    private val onWakeWordTriggered: (matchedTranscript: String, similarityScore: Int) -> Unit
+    private val onWakeWordDetected: (matchedTranscript: String, similarityScore: Int) -> Unit,
+    private val onStandbyStatusChanged: (isListening: Boolean, statusText: String) -> Unit
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
@@ -91,6 +95,25 @@ class WakeWordManager(
     private var rmsSamplesInUtterance = mutableListOf<Float>()
     private var lastTriggerWallMs: Long = 0L
 
+    fun startStandby(settings: AppSettings) {
+        configure(
+            enabled = settings.wakeWordEnabled,
+            wakePhrase = settings.wakeWordPhrase,
+            useVoiceprint = settings.wakeWordVoiceprintEnabled,
+            voiceprintDataJson = settings.wakeWordVoiceprintData,
+            isCallCurrentlyActive = false
+        )
+    }
+
+    fun stopStandby() {
+        isPausedForActiveCall = true
+        stopListeningOnMainThread()
+        if (!isStandbyEnabled) {
+            stopForegroundKeepAliveService()
+        }
+        onStandbyStatusChanged(false, "語音喚醒待機已暫停")
+    }
+
     fun configure(
         enabled: Boolean,
         wakePhrase: String,
@@ -113,7 +136,7 @@ class WakeWordManager(
             isStandbyEnabled = false
             stopForegroundKeepAliveService()
             stopListeningOnMainThread()
-            onStatusChanged(false, "語音喚醒待機已關閉")
+            onStandbyStatusChanged(false, "語音喚醒待機已關閉")
         } else if (enabled) {
             if (isPausedForActiveCall) {
                 stopListeningOnMainThread()
@@ -166,11 +189,11 @@ class WakeWordManager(
         mainHandler.post {
             if (!isStandbyEnabled || isPausedForActiveCall || isEnrollingVoiceprint) return@post
             if (!hasRecordPermission()) {
-                onStatusChanged(false, "缺少麥克風權限，無法啟動喚醒詞待機")
+                onStandbyStatusChanged(false, "缺少麥克風權限，無法啟動喚醒詞待機")
                 return@post
             }
             if (!SpeechRecognizer.isRecognitionAvailable(context)) {
-                onStatusChanged(false, "此裝置不支援系統離線/本地語音喚醒辨識")
+                onStandbyStatusChanged(false, "此裝置不支援系統離線/本地語音喚醒辨識")
                 return@post
             }
 
@@ -183,7 +206,7 @@ class WakeWordManager(
                     override fun onReadyForSpeech(params: Bundle?) {
                         maxRmsInCurrentUtterance = -10f
                         rmsSamplesInUtterance.clear()
-                        onStatusChanged(true, "🎧 待機聆聽喚醒詞：「$targetWakePhrase」（0 API 費用）")
+                        onStandbyStatusChanged(true, "🎧 待機聆聽喚醒詞：「$targetWakePhrase」（0 API 費用）")
                     }
 
                     override fun onBeginningOfSpeech() {
@@ -268,7 +291,7 @@ class WakeWordManager(
                 }
                 if (similarityScore < 72) {
                     withContext(Dispatchers.Main) {
-                        onStatusChanged(true, "🛡️ 已攔截非本人聲紋喚醒（相似度 $similarityScore% < 72%）")
+                        onStandbyStatusChanged(true, "🛡️ 已攔截非本人聲紋喚醒（相似度 $similarityScore% < 72%）")
                         scheduleRestartListening(delayMs = 900L)
                     }
                     return@launch
@@ -277,7 +300,7 @@ class WakeWordManager(
 
             withContext(Dispatchers.Main) {
                 playWakeChimeAndVibrate()
-                onWakeWordTriggered(matchedText, similarityScore)
+                onWakeWordDetected(matchedText, similarityScore)
             }
         }
         return true

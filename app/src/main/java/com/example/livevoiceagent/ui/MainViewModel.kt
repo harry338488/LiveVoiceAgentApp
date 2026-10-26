@@ -152,10 +152,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
         }
     }
 
-    private fun handleWakeWordTriggered(transcript: String, similarityScore: Float) {
+    private fun handleWakeWordTriggered(transcript: String, similarityScore: Int) {
         val state = _uiState.value
         if (state.connectionState != ConnectionState.DISCONNECTED) return
-        val scorePercent = (similarityScore * 100).toInt()
+        val scorePercent = similarityScore.coerceIn(0, 100)
         val vpTag = if (state.settings.wakeWordVoiceprintEnabled && state.settings.wakeWordVoiceprintData.isNotBlank()) {
             " · 聲紋吻合 $scorePercent%"
         } else {
@@ -222,10 +222,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
         }
         viewModelScope.launch {
             val res = wakeWordManager.enrollVoiceprintSample(_uiState.value.settings.wakeWordVoiceprintData)
-            res.onSuccess { updatedJson ->
-                val profile = WakeWordManager.VoiceprintProfile.fromJson(updatedJson)
-                val count = profile?.sampleCount ?: 1
-                val pitchHz = profile?.meanPitchHz?.toInt() ?: 0
+            res.onSuccess { profile ->
+                val updatedJson = profile.toJsonString()
+                val count = profile.sampleCount
+                val pitchHz = profile.meanPitchHz.toInt()
                 val newSettings = _uiState.value.settings.copy(
                     wakeWordVoiceprintData = updatedJson,
                     wakeWordVoiceprintEnabled = true

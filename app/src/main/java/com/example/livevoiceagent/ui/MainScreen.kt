@@ -58,6 +58,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import com.example.livevoiceagent.audio.VoiceprintProfile
 import com.example.livevoiceagent.audio.WakeWordManager
 import com.example.livevoiceagent.model.*
 import com.example.livevoiceagent.network.ConnectionState
@@ -4457,7 +4458,7 @@ private fun WakeWordAndVoiceprintDialog(
         mutableStateOf(settings.wakeWordPhrase.ifBlank { "hey Luna 我需要你" })
     }
     val enrolledProfile = remember(settings.wakeWordVoiceprintData) {
-        WakeWordManager.VoiceprintProfile.fromJson(settings.wakeWordVoiceprintData)
+        VoiceprintProfile.fromJson(settings.wakeWordVoiceprintData)
     }
 
     AlertDialog(
