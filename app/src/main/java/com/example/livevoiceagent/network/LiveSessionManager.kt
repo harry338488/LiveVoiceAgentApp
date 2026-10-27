@@ -235,8 +235,76 @@ class LiveSessionManager(
                     reason = "👋 偵測到語音結束指令（「$matchedGoodbye」），AI 道別後自動掛斷",
                     delayMs = 2700L
                 )
+                return@launch
+            }
+
+            // ⚡ On-device navigation fast path: "導航到X / 帶我去X / 開車去X / 去X怎麼走" -> open Google Maps
+            // directly (~1s) without waiting for the LLM delegation round trip (3~5s).
+            if (activeSettings.locationToolsEnabled && activeSettings.appMode == AppMode.ASSISTANT) {
+                delay(250L) // extra debounce so the destination name is fully transcribed
+                if (!sessionStarted || isClosing) return@launch
+                val navIntent = LocationMapsToolManager.parseVoiceNavigationIntent(currentTurnUserTextAccumulated)
+                    ?: return@launch
+                val turnIdx = currentTurnIndex
+                val dedupeKey = "$turnIdx|${navIntent.destination}"
+                if (dedupeKey == lastFastNavKey) return@launch
+                lastFastNavKey = dedupeKey
+                runFastPathNavigation(navIntent, turnIdx)
             }
         }
+    }
+
+    @Volatile
+    private var lastFastNavKey: String = ""
+
+    private suspend fun runFastPathNavigation(navIntent: LocationMapsToolManager.Companion.VoiceNavIntent, turnIdx: Int) {
+        val settings = activeSettings
+        val args = JSONObject().apply {
+            put("destination", navIntent.destination)
+            put("travel_mode", navIntent.travelMode)
+            put("auto_launch_app", true)
+            put("_require_resolved", true)
+        }
+        val res = runCatching {
+            locationMapsToolManager.executeLocationOrMapTool(
+                toolName = "open_google_maps_navigation",
+                argsJson = args,
+                linkupApiKey = settings.linkupApiKey,
+                linkupDepth = settings.linkupSearchDepth,
+                googleMapsApiKey = settings.googleMapsApiKey
+            )
+        }.getOrNull() ?: return
+        val out = runCatching { JSONObject(res.toolOutputJson) }.getOrNull() ?: return
+        if (out.optString("status") != "success") return // not confidently resolved -> let the LLM reason about homophones
+        if (!sessionStarted || isClosing) return
+
+        res.mapActionSource?.let { mapSource ->
+            listener.onSearchCardAdded(
+                LinkupSearchResult(
+                    query = mapSource.title,
+                    answer = res.actionLogText,
+                    sources = listOf(mapSource),
+                    rawFormattedForLlm = res.toolOutputJson
+                ),
+                turnIdx
+            )
+        }
+        if (res.actionLogText.isNotBlank()) {
+            listener.onTranscriptDelta(
+                role = MessageRole.SYSTEM,
+                delta = "⚡ 手機端極速導航：\n" + res.actionLogText,
+                timelineMs = System.currentTimeMillis(),
+                modelTag = "Location & Maps",
+                streamKey = "turn_${sessionEpochId}_${turnIdx}_fastnav",
+                turnIndex = turnIdx
+            )
+        }
+        val placeName = out.optString("resolved_place_name", navIntent.destination)
+        val dist = out.optString("distance_from_user", "")
+        injectVisionResultIntoActiveVoiceSession(
+            "[系統：手機端已直接完成導航] 已為使用者開啟 Google Maps 導航至「$placeName」${if (dist.isNotBlank()) "（距離約 $dist）" else ""}。" +
+                    "請只用一句很短的話告知使用者（例如：「好，已經幫你導航到$placeName 了！」），不要再呼叫 open_google_maps_navigation，也不要委派後端。"
+        )
     }
 
     private val audioClipLock = Any()

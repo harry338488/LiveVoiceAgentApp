@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="talk_to_luna"
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="@string/shortcut_talk_short"
+        android:shortcutLongLabel="@string/shortcut_talk_long">
+        <intent
+            android:action="com.example.livevoiceagent.START_VOICE_CHAT"
+            android:targetPackage="com.harry338488.livevoiceagent"
+            android:targetClass="com.example.livevoiceagent.MainActivity" />
+    </shortcut>
+</shortcuts>

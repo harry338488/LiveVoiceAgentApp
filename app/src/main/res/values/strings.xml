@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">Live Voice Brain</string>
+    <string name="shortcut_talk_short">和 Luna 對話</string>
+    <string name="shortcut_talk_long">🎙️ 立即開始 Luna 語音對話</string>
 </resources>

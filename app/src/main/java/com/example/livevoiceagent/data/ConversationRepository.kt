@@ -67,6 +67,8 @@ class ConversationRepository(private val context: Context) {
             wakeWordFirstUtteranceTimeoutSec = prefs.getInt("wakeWordFirstUtteranceTimeoutSec", 8),
             wakeWordIdleTimeoutSec = prefs.getInt("wakeWordIdleTimeoutSec", 25),
             wakeWordMaxDurationSec = prefs.getInt("wakeWordMaxDurationSec", 90),
+            wakeWordBringAppToFront = prefs.getBoolean("wakeWordBringAppToFront", false),
+            autoStartCallOnAppLaunch = prefs.getBoolean("autoStartCallOnAppLaunch", false),
             translationTargetLanguage = prefs.getString("translationTargetLanguage", "zh") ?: "zh",
             translationSecondaryLanguage = prefs.getString("translationSecondaryLanguage", "ja") ?: "ja",
             customGlossaryTerms = prefs.getString("customGlossaryTerms", "") ?: "",
@@ -120,6 +122,8 @@ class ConversationRepository(private val context: Context) {
             putInt("wakeWordFirstUtteranceTimeoutSec", settings.wakeWordFirstUtteranceTimeoutSec.coerceIn(5, 30))
             putInt("wakeWordIdleTimeoutSec", settings.wakeWordIdleTimeoutSec.coerceIn(10, 120))
             putInt("wakeWordMaxDurationSec", settings.wakeWordMaxDurationSec.coerceIn(30, 600))
+            putBoolean("wakeWordBringAppToFront", settings.wakeWordBringAppToFront)
+            putBoolean("autoStartCallOnAppLaunch", settings.autoStartCallOnAppLaunch)
             putString("translationTargetLanguage", settings.translationTargetLanguage.trim())
             putString("translationSecondaryLanguage", settings.translationSecondaryLanguage.trim())
             putString("customGlossaryTerms", settings.customGlossaryTerms)

@@ -17,7 +17,34 @@ class WakeWordForegroundService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    /**
+     * Partial CPU wake lock (screen stays OFF) so the on-device wake-word loop keeps running
+     * after the screen sleeps / phone enters Doze in the pocket or on the desk.
+     */
+    private var cpuWakeLock: android.os.PowerManager.WakeLock? = null
+
+    private fun acquireCpuWakeLock() {
+        if (cpuWakeLock?.isHeld == true) return
+        runCatching {
+            val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+            cpuWakeLock = pm.newWakeLock(
+                android.os.PowerManager.PARTIAL_WAKE_LOCK,
+                "LiveVoiceAgent:WakeWordStandby"
+            ).apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        runCatching { if (cpuWakeLock?.isHeld == true) cpuWakeLock?.release() }
+        cpuWakeLock = null
+        super.onDestroy()
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        acquireCpuWakeLock()
         val wakePhrase = intent?.getStringExtra("wake_phrase")?.takeIf { it.isNotBlank() } ?: "hey Luna 我需要你"
         val notification = buildNotification(wakePhrase)
         runCatching {

@@ -4609,6 +4609,92 @@ private fun WakeWordAndVoiceprintDialog(
                     }
                 }
 
+                // 1c. Background behaviour / screen-off / Hey Google coexistence
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color(0xFF161F30),
+                    border = BorderStroke(1.dp, CyanAccent.copy(alpha = 0.35f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    "📲 喚醒時彈出 App 畫面",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                                Text(
+                                    if (settings.wakeWordBringAppToFront) "開啟：喊喚醒詞會切換到本 App 畫面"
+                                    else "關閉（建議）：Luna 在背景直接對話，不打斷您正在使用的 App",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFFCBD5E1)
+                                )
+                            }
+                            Switch(
+                                checked = settings.wakeWordBringAppToFront,
+                                onCheckedChange = { onUpdateSettings(settings.copy(wakeWordBringAppToFront = it)) }
+                            )
+                        }
+
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    "🤝 開啟 App 時自動開始對話（與 Hey Google 共存）",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                                Text(
+                                    "可關閉上方常駐喚醒（不佔麥克風，Hey Google 恢復正常），改說「Hey Google，開啟 Live Voice Brain」即自動進入對話。長按 App 圖示也有「和 Luna 對話」捷徑。",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFFCBD5E1)
+                                )
+                            }
+                            Switch(
+                                checked = settings.autoStartCallOnAppLaunch,
+                                onCheckedChange = { onUpdateSettings(settings.copy(autoStartCallOnAppLaunch = it)) }
+                            )
+                        }
+
+                        val powerManager = remember { context.getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager }
+                        var ignoringBatteryOpt by remember { mutableStateOf(powerManager.isIgnoringBatteryOptimizations(context.packageName)) }
+                        LaunchedEffect(Unit) {
+                            while (true) {
+                                ignoringBatteryOpt = powerManager.isIgnoringBatteryOptimizations(context.packageName)
+                                kotlinx.coroutines.delay(1000L)
+                            }
+                        }
+                        Text(
+                            if (ignoringBatteryOpt) "✅ 已排除電池最佳化：螢幕休眠時喚醒詞仍可穩定運作"
+                            else "🌙 螢幕休眠時要穩定喚醒，建議允許「不限制電池用量」（否則部分手機休眠數分鐘後會被系統暫停）",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (ignoringBatteryOpt) Color(0xFFA7F3D0) else Color(0xFFFDE68A)
+                        )
+                        if (!ignoringBatteryOpt) {
+                            OutlinedButton(
+                                onClick = {
+                                    runCatching {
+                                        context.startActivity(
+                                            android.content.Intent(
+                                                android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                                android.net.Uri.parse("package:${context.packageName}")
+                                            ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        )
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("🔋 一鍵允許「不限制電池用量」", color = CyanAccent)
+                            }
+                        }
+                    }
+                }
+
                 // 2. Wake Phrase Input (Default: "hey Luna 我需要你")
                 OutlinedTextField(
                     value = wakePhraseText,

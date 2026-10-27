@@ -58,18 +58,21 @@ class MainActivity : ComponentActivity() {
         window.statusBarColor = Color(0xFF080C14).toArgb()
         window.navigationBarColor = Color(0xFF0B1120).toArgb()
 
-        // Observe 100% zero-click Google Maps auto-navigation events on the foreground Activity UI thread
+        // Google Maps is launched directly by LocationMapsToolManager (works in foreground AND background);
+        // the Activity only shows a confirmation toast to avoid double-launching Maps.
         lifecycleScope.launch {
             mainViewModel.googleMapsLaunchEvent.collect { req ->
-                launchGoogleMapsZeroClick(
-                    primaryUri = req.primaryUri,
-                    fallbackWebUrl = req.fallbackWebUrl,
-                    destinationLabel = req.destinationLabel
-                )
+                if (lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "🧭 正在自動跳轉 Google Maps 導航：${req.destinationLabel}",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
             }
         }
 
-        handleVoiceAssistantIntentIfNeeded(intent)
+        handleVoiceAssistantIntentIfNeeded(intent, isColdStart = savedInstanceState == null)
 
         setContent {
             val permissionsLauncher = rememberLauncherForActivityResult(
@@ -132,12 +135,24 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        handleVoiceAssistantIntentIfNeeded(intent)
+        setIntent(intent)
+        handleVoiceAssistantIntentIfNeeded(intent, isColdStart = false)
     }
 
-    private fun handleVoiceAssistantIntentIfNeeded(intent: Intent?) {
+    /**
+     * Hands-free entry points that auto-start a Live Chat (coexists with "Hey Google"):
+     * - ACTION_ASSIST / VOICE_COMMAND (set Luna as the default assistant app, or long-press home)
+     * - App shortcut / deep link `livevoiceagent://talk` (Hey Google, "開啟 Luna 對話" routines, Samsung Bixby/back-tap shortcuts)
+     * - Normal launcher open ("Hey Google, 開啟 Live Voice Agent") when "開啟 App 時自動開始對話" is enabled
+     */
+    private fun handleVoiceAssistantIntentIfNeeded(intent: Intent?, isColdStart: Boolean) {
         val action = intent?.action ?: return
-        if (action == Intent.ACTION_ASSIST || action == Intent.ACTION_VOICE_COMMAND) {
+        val isAssistAction = action == Intent.ACTION_ASSIST || action == Intent.ACTION_VOICE_COMMAND
+        val isTalkShortcut = action == ACTION_START_VOICE_CHAT ||
+                (action == Intent.ACTION_VIEW && intent.data?.scheme == "livevoiceagent")
+        val isLauncherOpen = action == Intent.ACTION_MAIN && isColdStart &&
+                mainViewModel.uiState.value.settings.autoStartCallOnAppLaunch
+        if (isAssistAction || isTalkShortcut || isLauncherOpen) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED &&
                 mainViewModel.uiState.value.connectionState == ConnectionState.DISCONNECTED
             ) {
@@ -146,39 +161,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun launchGoogleMapsZeroClick(
-        primaryUri: String,
-        fallbackWebUrl: String,
-        destinationLabel: String
-    ) {
-        Toast.makeText(
-            this,
-            "🧭 正在自動跳轉 Google Maps 導航：$destinationLabel",
-            Toast.LENGTH_SHORT
-        ).show()
-
-        // 1. Try native Google Maps package with primaryUri (e.g. google.navigation:q=...&mode=w)
-        val launchedNativePkg = runCatching {
-            val mapIntent = Intent(Intent.ACTION_VIEW, Uri.parse(primaryUri)).apply {
-                setPackage("com.google.android.apps.maps")
-            }
-            startActivity(mapIntent)
-            true
-        }.getOrDefault(false)
-
-        if (launchedNativePkg) return
-
-        // 2. Try generic VIEW intent with primaryUri
-        val launchedGeneric = runCatching {
-            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(primaryUri)))
-            true
-        }.getOrDefault(false)
-
-        if (launchedGeneric) return
-
-        // 3. Fallback to Google Maps Universal Web URL
-        runCatching {
-            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(fallbackWebUrl)))
-        }
+    companion object {
+        const val ACTION_START_VOICE_CHAT = "com.example.livevoiceagent.START_VOICE_CHAT"
     }
 }

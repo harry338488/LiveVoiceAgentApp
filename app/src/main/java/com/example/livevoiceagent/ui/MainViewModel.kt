@@ -167,8 +167,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
             ""
         }
 
-        // Bring MainActivity to foreground if woken from background (works immediately when overlay permission is granted)
-        runCatching {
+        // Optionally bring MainActivity to foreground (default OFF: Luna stays in background and does not interrupt the current app)
+        if (state.settings.wakeWordBringAppToFront) runCatching {
             val appCtx = getApplication<Application>().applicationContext
             val bringFrontIntent = Intent(appCtx, MainActivity::class.java).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)

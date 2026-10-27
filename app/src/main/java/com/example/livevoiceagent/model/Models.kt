@@ -324,6 +324,10 @@ data class AppSettings(
     val wakeWordFirstUtteranceTimeoutSec: Int = 8,
     val wakeWordIdleTimeoutSec: Int = 25,
     val wakeWordMaxDurationSec: Int = 90,
+    /** When true, waking Luna via wake word also pops the App UI to the foreground. Default false = stay in background. */
+    val wakeWordBringAppToFront: Boolean = false,
+    /** When true, opening the App (launcher / "Hey Google, 開啟 App" / shortcut) auto-starts a hands-free Live Chat. */
+    val autoStartCallOnAppLaunch: Boolean = false,
     val translationTargetLanguage: String = "zh",
     val translationSecondaryLanguage: String = "ja",
     val customGlossaryTerms: String = "",
