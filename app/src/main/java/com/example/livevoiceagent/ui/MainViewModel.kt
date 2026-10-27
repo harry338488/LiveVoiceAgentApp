@@ -1,8 +1,10 @@
 package com.example.livevoiceagent.ui
 
 import android.app.Application
+import android.content.Intent
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.livevoiceagent.MainActivity
 import com.example.livevoiceagent.audio.WakeWordManager
 import com.example.livevoiceagent.data.ConversationRepository
 import com.example.livevoiceagent.model.*
@@ -100,6 +102,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
     private val isGeneratingTitle = AtomicBoolean(false)
     private var pendingAutoHangupJob: Job? = null
     private var persistSessionJob: Job? = null
+    private var titleDebounceJob: Job? = null
 
     init {
         val loadedSettings = repository.loadSettings()
@@ -163,6 +166,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
         } else {
             ""
         }
+
+        // Bring MainActivity to foreground if woken from background (works immediately when overlay permission is granted)
+        runCatching {
+            val appCtx = getApplication<Application>().applicationContext
+            val bringFrontIntent = Intent(appCtx, MainActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+            }
+            appCtx.startActivity(bringFrontIntent)
+        }
+
+        // If the current session already has messages from an earlier finished chat, start a clean session for this wake call
+        if (state.currentSession.messages.isNotEmpty() && state.currentSession.isTitleAiGenerated) {
+            persistCurrentSession(immediate = true)
+            val s = state.settings
+            val timeLabel = SimpleDateFormat("MM/dd HH:mm", Locale.getDefault()).format(Date())
+            _uiState.update {
+                it.copy(
+                    currentSession = ConversationSession(
+                        title = "新語音對話 ($timeLabel)",
+                        frontendModel = s.frontendVoiceModel,
+                        backendModel = s.backendBrainModel,
+                        isTitleAiGenerated = false
+                    )
+                )
+            }
+        }
+
         _uiState.update {
             it.copy(
                 statusBanner = "🗣️ 語音喚醒成功（「$transcript」$vpTag）— 正在啟動全雙工對話...",
@@ -830,18 +860,39 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
     private fun triggerAiTitleGenerationIfNeeded() {
         val current = _uiState.value.currentSession
         if (current.isTitleAiGenerated) return
-        val hasUser = current.messages.any { it.role == MessageRole.USER && it.text.length >= 2 }
-        val hasAi = current.messages.any {
-            it.role != MessageRole.USER && (it.text.length >= 6 || it.backendThinkingText.length >= 6)
+
+        val firstUserMsg = current.messages.firstOrNull {
+            it.role == MessageRole.USER && it.text.trim().length >= 2
         }
-        if (!hasUser || !hasAi) return
-        if (!isGeneratingTitle.compareAndSet(false, true)) return
+        val firstUserTurn = firstUserMsg?.turnIndex ?: -1
+        if (firstUserTurn <= 0) return
 
-        val targetSessionId = current.id
-        val settingsSnapshot = _uiState.value.settings
-        val messagesSnapshot = current.messages
+        // In wake-word sessions, turn 1 is AI's "我在，請說！" greeting BEFORE the user speaks.
+        // Wait until AI has replied in/after the user's turn (or a tool ran, or call disconnected).
+        val isCallDisconnected = _uiState.value.connectionState == ConnectionState.DISCONNECTED
+        val hasAiReplyAfterUser = current.messages.any {
+            it.role != MessageRole.USER &&
+                    it.turnIndex >= firstUserTurn &&
+                    (it.text.trim().length >= 5 ||
+                            it.backendThinkingText.trim().length >= 5 ||
+                            it.calendarActionLogs.isNotEmpty() ||
+                            it.searchQueriesAndSummaries.isNotEmpty())
+        }
+        if (!hasAiReplyAfterUser && !isCallDisconnected) return
 
-        viewModelScope.launch(Dispatchers.IO) {
+        titleDebounceJob?.cancel()
+        titleDebounceJob = viewModelScope.launch(Dispatchers.IO) {
+            if (!isCallDisconnected) {
+                delay(1200L)
+            }
+            val latestSession = _uiState.value.currentSession
+            if (latestSession.isTitleAiGenerated) return@launch
+            if (!isGeneratingTitle.compareAndSet(false, true)) return@launch
+
+            val targetSessionId = latestSession.id
+            val settingsSnapshot = _uiState.value.settings
+            val messagesSnapshot = latestSession.messages
+
             try {
                 val aiTitle = backendLlmClient.generateConversationTitle(settingsSnapshot, messagesSnapshot)
                 if (!aiTitle.isNullOrBlank()) {
@@ -896,6 +947,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
             it.copy(connectionState = state, statusBanner = statusText)
         }
         if (state == ConnectionState.DISCONNECTED) {
+            triggerAiTitleGenerationIfNeeded()
             viewModelScope.launch {
                 delay(650L)
                 val current = _uiState.value
@@ -1082,11 +1134,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
             val orderedMsgs = sortMessagesByTurn(currentMsgs)
 
             // Immediate fallback title before AI title finishes generating
-            val firstUserText = orderedMsgs.firstOrNull { it.role == MessageRole.USER }?.text?.trim().orEmpty()
-            val updatedTitle = if (!state.currentSession.isTitleAiGenerated &&
-                firstUserText.length >= 4 &&
-                (state.currentSession.title.startsWith("新語音對話") || state.currentSession.title.startsWith("語音對話 ("))
-            ) {
+            val firstUserText = orderedMsgs
+                .firstOrNull { it.role == MessageRole.USER && it.text.trim().isNotEmpty() }
+                ?.text
+                ?.trim()
+                .orEmpty()
+            val updatedTitle = if (!state.currentSession.isTitleAiGenerated && firstUserText.length >= 2) {
                 firstUserText.take(20)
             } else {
                 state.currentSession.title
@@ -1101,6 +1154,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
                     messages = orderedMsgs
                 )
             )
+        }
+        if (role != MessageRole.USER) {
+            triggerAiTitleGenerationIfNeeded()
         }
         persistCurrentSession()
     }

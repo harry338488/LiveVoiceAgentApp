@@ -574,11 +574,26 @@ class BackendLlmClient(
             val (baseUrl, apiKey, model) = resolveBackendCredentials(settings)
             val snippet = messages
                 .filter { it.role == MessageRole.USER || it.role == MessageRole.ASSISTANT_VOICE }
-                .take(4)
-                .joinToString("\n") {
-                    val content = it.text.ifBlank { it.backendThinkingText }
-                    "${if (it.role == MessageRole.USER) "使用者" else "AI"}: ${content.take(150)}"
+                .take(8)
+                .mapNotNull { msg ->
+                    val toolSummary = (msg.calendarActionLogs + msg.searchQueriesAndSummaries)
+                        .joinToString(" ")
+                        .take(120)
+                    val content = buildString {
+                        if (msg.text.isNotBlank()) append(msg.text.trim())
+                        if (msg.backendThinkingText.isNotBlank()) {
+                            if (isNotEmpty()) append(" ")
+                            append(msg.backendThinkingText.trim())
+                        }
+                        if (toolSummary.isNotBlank()) {
+                            if (isNotEmpty()) append(" ")
+                            append(toolSummary)
+                        }
+                    }.trim()
+                    if (content.isBlank()) null
+                    else "${if (msg.role == MessageRole.USER) "使用者" else "AI"}: ${content.take(160)}"
                 }
+                .joinToString("\n")
 
             if (snippet.isBlank()) return@withContext null
 

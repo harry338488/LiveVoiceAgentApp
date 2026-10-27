@@ -2,6 +2,9 @@ package com.example.livevoiceagent.tools
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -9,6 +12,10 @@ import android.location.Geocoder
 import android.location.Location
 import android.location.LocationManager
 import android.net.Uri
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.example.livevoiceagent.model.SearchSource
 import com.example.livevoiceagent.network.LinkupSearchClient
@@ -581,12 +588,10 @@ class LocationMapsToolManager(
         }
 
         if (autoLaunch) {
-            val callback = onAutoLaunchGoogleMaps
-            if (callback != null) {
-                callback.invoke(primaryNavigationUri, universalMapsUrl, destination)
-            } else {
-                launchGoogleMapsIntent(primaryNavigationUri, universalMapsUrl)
+            Handler(Looper.getMainLooper()).post {
+                launchGoogleMapsIntent(primaryNavigationUri, universalMapsUrl, destination)
             }
+            onAutoLaunchGoogleMaps?.invoke(primaryNavigationUri, universalMapsUrl, destination)
         }
 
         val geocoded = forwardGeocodePlace(destination)
@@ -622,31 +627,66 @@ class LocationMapsToolManager(
         )
     }
 
-    fun launchGoogleMapsIntent(primaryUriStr: String, fallbackWebUrl: String = primaryUriStr): Boolean {
+    fun launchGoogleMapsIntent(
+        primaryUriStr: String,
+        fallbackWebUrl: String = primaryUriStr,
+        destinationLabel: String = "目的地"
+    ): Boolean {
         return runCatching {
             val primaryIntent = Intent(Intent.ACTION_VIEW, Uri.parse(primaryUriStr)).apply {
                 setPackage("com.google.android.apps.maps")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            }
+            val fallbackMapsIntent = Intent(Intent.ACTION_VIEW, Uri.parse(fallbackWebUrl)).apply {
+                setPackage("com.google.android.apps.maps")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            }
+            val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(fallbackWebUrl)).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            try {
-                context.startActivity(primaryIntent)
-                return@runCatching true
-            } catch (_: Exception) {
-                val fallbackMapsIntent = Intent(Intent.ACTION_VIEW, Uri.parse(fallbackWebUrl)).apply {
-                    setPackage("com.google.android.apps.maps")
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                try {
-                    context.startActivity(fallbackMapsIntent)
-                    return@runCatching true
-                } catch (_: Exception) {
-                    val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(fallbackWebUrl)).apply {
-                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    }
-                    context.startActivity(browserIntent)
-                    return@runCatching true
-                }
+
+            val resolvedIntent = when {
+                primaryIntent.resolveActivity(context.packageManager) != null -> primaryIntent
+                fallbackMapsIntent.resolveActivity(context.packageManager) != null -> fallbackMapsIntent
+                else -> browserIntent
             }
+
+            // 1. Direct startActivity (succeeds from foreground OR from background when SYSTEM_ALERT_WINDOW is granted)
+            runCatching { context.startActivity(resolvedIntent) }
+
+            // 2. PendingIntent send + High-Priority Full-Screen Intent Notification for background wake sessions
+            runCatching {
+                val flags = PendingIntent.FLAG_UPDATE_CURRENT or
+                        (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
+                val pi = PendingIntent.getActivity(context, 9912, resolvedIntent, flags)
+                runCatching { pi.send() }
+
+                val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                val channelId = "maps_auto_nav_channel"
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    val ch = NotificationChannel(
+                        channelId,
+                        "Google Maps 自動導航跳轉",
+                        NotificationManager.IMPORTANCE_HIGH
+                    ).apply {
+                        description = "當在背景透過語音喚醒要求導航時，自動彈出並啟動 Google Maps"
+                    }
+                    nm.createNotificationChannel(ch)
+                }
+                val notif = NotificationCompat.Builder(context, channelId)
+                    .setSmallIcon(android.R.drawable.ic_dialog_map)
+                    .setContentTitle("🚀 正在開啟 Google Maps 導航")
+                    .setContentText("目的地：$destinationLabel（點擊立即開啟）")
+                    .setPriority(NotificationCompat.PRIORITY_MAX)
+                    .setCategory(NotificationCompat.CATEGORY_NAVIGATION)
+                    .setAutoCancel(true)
+                    .setContentIntent(pi)
+                    .setFullScreenIntent(pi, true)
+                    .setTimeoutAfter(12_000L)
+                    .build()
+                nm.notify(9912, notif)
+            }
+            true
         }.getOrDefault(false)
     }
 

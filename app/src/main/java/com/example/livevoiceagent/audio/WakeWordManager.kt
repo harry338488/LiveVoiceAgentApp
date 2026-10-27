@@ -382,7 +382,9 @@ class WakeWordManager(
                 var consecutiveActiveFrames = 0
                 var consecutiveSilentFrames = 0
                 var voicedFramesInUtterance = 0
-                var ambientNoiseRms = 0.006f
+                var maxRmsInUtterance = 0f
+                var sumRmsInUtterance = 0f
+                var ambientNoiseRms = 0.008f
                 var modeCheckCounter = 0
 
                 val frameBuf = ShortArray(frameSize)
@@ -414,13 +416,13 @@ class WakeWordManager(
                     val frameRms = sqrt(sumSq / read).toFloat()
                     val frameCopy = frameBuf.copyOf(read)
 
-                    // Adaptive speech threshold: sensitive enough for normal speaking distance, ignores quiet room hum
-                    val onsetThreshold = (ambientNoiseRms * 2.5f).coerceIn(0.013f, 0.042f)
-                    val sustainThreshold = (ambientNoiseRms * 1.8f).coerceIn(0.010f, 0.032f)
+                    // Strict near-field speech threshold: rejects silent room hum, AC/fan noise, and faint distant sounds
+                    val onsetThreshold = (ambientNoiseRms * 3.0f).coerceIn(0.032f, 0.068f)
+                    val sustainThreshold = (ambientNoiseRms * 2.1f).coerceIn(0.022f, 0.048f)
 
                     if (!isCollectingSpeech) {
                         if (frameRms < onsetThreshold) {
-                            ambientNoiseRms = (ambientNoiseRms * 0.96f + frameRms * 0.04f).coerceIn(0.003f, 0.025f)
+                            ambientNoiseRms = (ambientNoiseRms * 0.96f + frameRms * 0.04f).coerceIn(0.004f, 0.028f)
                             consecutiveActiveFrames = 0
                         } else {
                             consecutiveActiveFrames++
@@ -431,11 +433,13 @@ class WakeWordManager(
                         }
                         preRollFrames.addLast(frameCopy)
 
-                        // Trigger utterance capture after 2 consecutive voiced frames (~64ms)
-                        if (consecutiveActiveFrames >= 2) {
+                        // Trigger utterance capture after 3 consecutive voiced frames (~96ms)
+                        if (consecutiveActiveFrames >= 3) {
                             isCollectingSpeech = true
                             consecutiveSilentFrames = 0
                             voicedFramesInUtterance = consecutiveActiveFrames
+                            maxRmsInUtterance = frameRms
+                            sumRmsInUtterance = frameRms
                             speechFrames.clear()
                             for (pf in preRollFrames) {
                                 speechFrames.add(pf)
@@ -444,6 +448,11 @@ class WakeWordManager(
                         }
                     } else {
                         speechFrames.add(frameCopy)
+                        if (frameRms > maxRmsInUtterance) {
+                            maxRmsInUtterance = frameRms
+                        }
+                        sumRmsInUtterance += frameRms
+
                         if (frameRms >= sustainThreshold) {
                             voicedFramesInUtterance++
                             consecutiveSilentFrames = 0
@@ -459,10 +468,23 @@ class WakeWordManager(
                             isCollectingSpeech = false
                             consecutiveActiveFrames = 0
                             val capturedVoicedCount = voicedFramesInUtterance
+                            val totalFrameCount = speechFrames.size
+                            val peakRms = maxRmsInUtterance
+                            val avgRms = (sumRmsInUtterance / totalFrameCount.coerceAtLeast(1)).coerceAtLeast(0.001f)
+                            val modulationRatio = peakRms / avgRms
                             voicedFramesInUtterance = 0
+                            maxRmsInUtterance = 0f
+                            sumRmsInUtterance = 0f
 
-                            // Require at least ~0.45s of voiced speech (10+ voiced frames) to ignore brief clicks/coughs
-                            if (capturedVoicedCount >= 10 && speechFrames.size >= 22) {
+                            // Strict human wake-phrase gate:
+                            // 1) At least 16 voiced frames (~0.51s of active speech) & 28 total frames (~0.90s)
+                            // 2) Peak near-field RMS >= 0.048f (ignores quiet room noise / breathing)
+                            // 3) Syllable modulation ratio >= 1.42f (ignores flat steady fan/AC hum)
+                            if (capturedVoicedCount >= 16 &&
+                                totalFrameCount >= 28 &&
+                                peakRms >= 0.048f &&
+                                modulationRatio >= 1.42f
+                            ) {
                                 val totalSamples = speechFrames.sumOf { it.size }
                                 val fullPcm = ShortArray(totalSamples)
                                 var offset = 0
@@ -537,22 +559,22 @@ class WakeWordManager(
         val now = System.currentTimeMillis()
         if (now - lastTriggerWallMs < 3500L) return false
 
-        // Step 1: Extract acoustic voiceprint directly from the spoken utterance
+        // Step 1: Extract acoustic voiceprint & verify true human vocal-cord harmonicity
         val candidateProfile = extractAcousticVoiceprint(
             samples = pcmSamples,
             length = pcmSamples.size,
             sampleRate = sampleRate,
-            minVoicedFrames = 4
+            minVoicedFrames = 8
         ) ?: return false
 
         var similarityScore = 95
         val profile = enrolledProfile
         if (voiceprintEnabled && profile != null) {
             similarityScore = computeVoiceprintSimilarityScore(profile, candidateProfile)
-            if (similarityScore < 62) {
+            if (similarityScore < 65) {
                 notifyStatusOnMain(
                     true,
-                    "🛡️ 已略過非本人聲紋語音（吻合度 $similarityScore% < 62%）· 持續待機中"
+                    "🛡️ 已略過非本人聲紋語音（吻合度 $similarityScore% < 65%）· 持續待機中"
                 )
                 return false
             }
@@ -564,17 +586,16 @@ class WakeWordManager(
             return false
         }
 
-        notifyStatusOnMain(true, "🎙️ 偵測到語音，正在辨識是否為「$targetWakePhrase」...")
+        notifyStatusOnMain(true, "🎙️ 偵測到人聲，正在辨識是否為「$targetWakePhrase」...")
 
-        // Step 2: Fast bilingual transcription of the 1-3s WAV clip
+        // Step 2: Fast bilingual transcription WITHOUT wake-phrase prompt (eliminates Whisper prompt hallucination on noise!)
         val transcript = transcribeWakeCandidateWithOpenAi(
             pcmSamples = pcmSamples,
             sampleRate = sampleRate,
-            apiKey = apiKey,
-            wakePhraseHint = targetWakePhrase
+            apiKey = apiKey
         ).trim()
 
-        if (transcript.isBlank()) {
+        if (transcript.isBlank() || isKnownWhisperHallucination(transcript)) {
             notifyStatusOnMain(true, "🎧 穩定待機中：請說「$targetWakePhrase」")
             return false
         }
@@ -604,14 +625,16 @@ class WakeWordManager(
         return true
     }
 
+    /**
+     * IMPORTANT: Never pass the target wake phrase in `prompt`, because Whisper / gpt-4o-mini-transcribe
+     * will hallucinate the exact `prompt` text whenever given quiet audio or ambient noise!
+     */
     private fun transcribeWakeCandidateWithOpenAi(
         pcmSamples: ShortArray,
         sampleRate: Int,
-        apiKey: String,
-        wakePhraseHint: String
+        apiKey: String
     ): String {
         val wavBytes = encodePcmToWavBytes(pcmSamples, sampleRate)
-        val promptHint = "請精確轉寫使用者的喚醒詞或短句，常見喚醒詞為：$wakePhraseHint, hey Luna 我需要你, 嘿露娜我需要你。"
 
         val modelsToTry = listOf("gpt-4o-mini-transcribe", "whisper-1")
         for (modelName in modelsToTry) {
@@ -624,7 +647,7 @@ class WakeWordManager(
                         wavBytes.toRequestBody("audio/wav".toMediaType())
                     )
                     .addFormDataPart("model", modelName)
-                    .addFormDataPart("prompt", promptHint)
+                    .addFormDataPart("temperature", "0")
                     .build()
 
                 val request = Request.Builder()
@@ -645,6 +668,15 @@ class WakeWordManager(
             }
         }
         return ""
+    }
+
+    private fun isKnownWhisperHallucination(text: String): Boolean {
+        val lower = text.lowercase(Locale.ROOT).trim()
+        val hallucinations = listOf(
+            "請不吝點讚", "訂閱", "轉發", "打賞", "明鏡與點點", "字幕由", "amara.org",
+            "thank you for watching", "thanks for watching", "subtitles by", "you", "."
+        )
+        return hallucinations.any { lower == it || (lower.length > 6 && lower.contains(it)) }
     }
 
     private fun encodePcmToWavBytes(pcmSamples: ShortArray, sampleRate: Int): ByteArray {
@@ -762,7 +794,7 @@ class WakeWordManager(
         samples: ShortArray,
         length: Int,
         sampleRate: Int,
-        minVoicedFrames: Int = 5
+        minVoicedFrames: Int = 8
     ): VoiceprintProfile? {
         val frameSize = 512 // 32ms at 16kHz
         if (length < frameSize * minVoicedFrames) return null
@@ -770,7 +802,7 @@ class WakeWordManager(
         val pitches = mutableListOf<Float>()
         val zcrs = mutableListOf<Float>()
         val bandAccum = FloatArray(8)
-        var voicedFrames = 0
+        var periodicVoicedFrames = 0
 
         // 8 representative center frequencies (Hz) for vocal timbre / formants
         val centerFreqs = floatArrayOf(180f, 340f, 580f, 920f, 1450f, 2150f, 3100f, 4400f)
@@ -790,14 +822,14 @@ class WakeWordManager(
                     }
                 }
             }
-            val rms = sqrt(sumSq / frameSize)
-            if (rms > 0.014) { // Voiced speech frame gate
-                voicedFrames++
-                zcrs.add(zeroCrossings.toFloat() / frameSize)
+            val zeroLagEnergy = sumSq / frameSize
+            val rms = sqrt(zeroLagEnergy)
 
-                // Estimate Fundamental Pitch F0 via Autocorrelation (80 Hz .. 360 Hz)
-                val minLag = sampleRate / 360
-                val maxLag = sampleRate / 80
+            // Require clear human speech frame energy (rms > 0.025)
+            if (rms > 0.025) {
+                // Estimate Fundamental Pitch F0 via Normalized Autocorrelation (85 Hz .. 350 Hz)
+                val minLag = sampleRate / 350
+                val maxLag = sampleRate / 85
                 var bestLag = minLag
                 var maxCorr = 0.0
                 for (lag in minLag..maxLag) {
@@ -819,32 +851,38 @@ class WakeWordManager(
                         }
                     }
                 }
-                if (maxCorr > 0.0003) {
-                    pitches.add(sampleRate.toFloat() / bestLag)
-                }
 
-                // Compute 8-band Goertzel spectral energy for vocal tract timbre
-                for (b in centerFreqs.indices) {
-                    val omega = (2.0 * PI * centerFreqs[b]) / sampleRate
-                    val coeff = 2.0 * cos(omega)
-                    var q1 = 0.0
-                    var q2 = 0.0
-                    for (i in 0 until frameSize step 2) {
-                        val x = samples[frameStart + i].toDouble() / 32768.0
-                        val q0 = coeff * q1 - q2 + x
-                        q2 = q1
-                        q1 = q0
+                // Normalized harmonicity ratio: periodic human vocal cords have >= 0.34; random noise is < 0.22
+                val harmonicity = maxCorr / zeroLagEnergy.coerceAtLeast(1e-7)
+                if (harmonicity >= 0.34) {
+                    periodicVoicedFrames++
+                    pitches.add(sampleRate.toFloat() / bestLag)
+                    zcrs.add(zeroCrossings.toFloat() / frameSize)
+
+                    // Compute 8-band Goertzel spectral energy for vocal tract timbre
+                    for (b in centerFreqs.indices) {
+                        val omega = (2.0 * PI * centerFreqs[b]) / sampleRate
+                        val coeff = 2.0 * cos(omega)
+                        var q1 = 0.0
+                        var q2 = 0.0
+                        for (i in 0 until frameSize step 2) {
+                            val x = samples[frameStart + i].toDouble() / 32768.0
+                            val q0 = coeff * q1 - q2 + x
+                            q2 = q1
+                            q1 = q0
+                        }
+                        val power = sqrt((q1 * q1 + q2 * q2 - q1 * q2 * coeff).coerceAtLeast(1e-9))
+                        bandAccum[b] += power.toFloat()
                     }
-                    val power = sqrt((q1 * q1 + q2 * q2 - q1 * q2 * coeff).coerceAtLeast(1e-9))
-                    bandAccum[b] += power.toFloat()
                 }
             }
             frameStart += frameSize / 2
         }
 
-        if (voicedFrames < minVoicedFrames) return null
+        // If the audio does not contain enough periodic human vocal-cord frames, reject as noise!
+        if (periodicVoicedFrames < minVoicedFrames || pitches.size < minVoicedFrames) return null
 
-        val meanPitch = if (pitches.isNotEmpty()) pitches.average().toFloat() else 165f
+        val meanPitch = pitches.average().toFloat()
         val pitchStd = if (pitches.size > 1) {
             sqrt(pitches.map { (it - meanPitch) * (it - meanPitch) }.average()).toFloat()
         } else {
@@ -871,28 +909,37 @@ class WakeWordManager(
         enrolled: VoiceprintProfile,
         candidate: VoiceprintProfile
     ): Int {
-        // 1. Cosine similarity on 8-band vocal tract timbre envelope
+        val len = minOf(enrolled.bandEnergies.size, candidate.bandEnergies.size)
+        if (len < 4) return 0
+
+        // 1. Zero-Mean Log-Spectral Shape Correlation (prevents positive-vector 78% floor on flat noise!)
+        val logA = FloatArray(len) { i -> ln(enrolled.bandEnergies[i].coerceAtLeast(1e-4f)) }
+        val logB = FloatArray(len) { i -> ln(candidate.bandEnergies[i].coerceAtLeast(1e-4f)) }
+        val meanA = logA.average().toFloat()
+        val meanB = logB.average().toFloat()
+
         var dot = 0f
         var magA = 0f
         var magB = 0f
-        for (i in 0 until minOf(enrolled.bandEnergies.size, candidate.bandEnergies.size)) {
-            val a = enrolled.bandEnergies[i]
-            val b = candidate.bandEnergies[i]
-            dot += a * b
-            magA += a * a
-            magB += b * b
+        for (i in 0 until len) {
+            val da = logA[i] - meanA
+            val db = logB[i] - meanB
+            dot += da * db
+            magA += da * da
+            magB += db * db
         }
-        val cosine = if (magA > 0f && magB > 0f) {
-            (dot / (sqrt(magA) * sqrt(magB))).coerceIn(0f, 1f)
+        val rawCorr = if (magA > 1e-5f && magB > 1e-5f) {
+            (dot / (sqrt(magA) * sqrt(magB))).coerceIn(-1f, 1f)
         } else {
-            0.85f
+            0f
         }
+        val spectralShapeSim = ((rawCorr + 1f) * 0.5f).coerceIn(0f, 1f)
 
-        // 2. Pitch F0 proximity score
-        val pitchDiffRatio = abs(enrolled.meanPitchHz - candidate.meanPitchHz) / enrolled.meanPitchHz.coerceAtLeast(80f)
-        val pitchSim = (1f - pitchDiffRatio * 0.85f).coerceIn(0.45f, 1f)
+        // 2. Strict Pitch F0 proximity score (no artificial 0.45 floor)
+        val pitchDiffRatio = abs(enrolled.meanPitchHz - candidate.meanPitchHz) / enrolled.meanPitchHz.coerceAtLeast(85f)
+        val pitchSim = (1f - pitchDiffRatio * 1.25f).coerceIn(0f, 1f)
 
-        val combined = (cosine * 0.74f + pitchSim * 0.26f) * 100f
+        val combined = (spectralShapeSim * 0.68f + pitchSim * 0.32f) * 100f
         return combined.roundToInt().coerceIn(0, 100)
     }
 
@@ -946,20 +993,10 @@ class WakeWordManager(
 
             val targetHasLuna = targetNorm.contains("luna")
             val targetHasNeedYou = targetNorm.contains("需要你")
-            if (targetHasLuna || targetHasNeedYou) {
+            if (targetHasLuna && targetHasNeedYou) {
                 val spokenHasLuna = spokenNorm.contains("luna")
-                val spokenHasHey = spokenNorm.contains("hey")
-                val spokenHasNeedYou = spokenNorm.contains("需要你") ||
-                        spokenNorm.contains("需要") ||
-                        spokenNorm.contains("找你") ||
-                        spokenNorm.contains("幫我")
-                // Match if:
-                // 1) "luna" + "需要你/需要"
-                // 2) "heyluna" (when user says "hey Luna 我需要你" and STT catches hey luna + partial)
-                // 3) Short wake command containing "我需要你" + ("hey" or "luna")
+                val spokenHasNeedYou = spokenNorm.contains("需要你") || spokenNorm.contains("需要")
                 if (spokenHasLuna && spokenHasNeedYou) return true
-                if (spokenNorm.contains("heyluna") && spokenNorm.length >= 7) return true
-                if (spokenHasHey && spokenNorm.contains("我需要你") && spokenNorm.length <= 16) return true
             }
             return false
         }

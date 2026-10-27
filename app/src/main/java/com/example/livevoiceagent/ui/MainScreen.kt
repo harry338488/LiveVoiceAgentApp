@@ -4453,9 +4453,25 @@ private fun WakeWordAndVoiceprintDialog(
     onEnrollVoiceprint: () -> Unit,
     onClearVoiceprint: () -> Unit
 ) {
+    val context = LocalContext.current
     val settings = uiState.settings
     var wakePhraseText by remember(settings.wakeWordPhrase) {
         mutableStateOf(settings.wakeWordPhrase.ifBlank { "hey Luna 我需要你" })
+    }
+    var canDrawOverlays by remember {
+        mutableStateOf(
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                android.provider.Settings.canDrawOverlays(context)
+            } else true
+        )
+    }
+    LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(1000L)
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                canDrawOverlays = android.provider.Settings.canDrawOverlays(context)
+            }
+        }
     }
     val enrolledProfile = remember(settings.wakeWordVoiceprintData) {
         VoiceprintProfile.fromJson(settings.wakeWordVoiceprintData)
@@ -4536,6 +4552,60 @@ private fun WakeWordAndVoiceprintDialog(
                                 )
                             }
                         )
+                    }
+                }
+
+                // 1b. Background Auto-Navigation & Wake-Up Overlay Permission Card
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = if (canDrawOverlays) Color(0xFF064E3B).copy(alpha = 0.25f) else Color(0xFF78350F).copy(alpha = 0.35f),
+                    border = BorderStroke(
+                        1.dp,
+                        if (canDrawOverlays) EmeraldAccent.copy(alpha = 0.55f) else Color(0xFFF59E0B).copy(alpha = 0.7f)
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = if (canDrawOverlays) {
+                                "✅ 已授權「顯示在其他應用程式上層」（背景自動跳轉 Google Maps 已啟用）"
+                            } else {
+                                "⚠️ 建議開啟「顯示在其他應用程式上層」權限（未開啟 App 時背景直接跳轉導航必備）"
+                            },
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = if (canDrawOverlays) Color(0xFFA7F3D0) else Color(0xFFFDE68A)
+                        )
+                        Text(
+                            text = "Android 10～14+ 系統限制背景服務直接跳轉其他 App。開啟此權限後，即使您未打開本 App，直接喊「hey Luna 我需要你」要求導航時，也能 100% 零點擊自動拉起 Google Maps 開始導航。",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFFCBD5E1)
+                        )
+                        if (!canDrawOverlays) {
+                            Button(
+                                onClick = {
+                                    runCatching {
+                                        val intent = android.content.Intent(
+                                            android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                            android.net.Uri.parse("package:${context.packageName}")
+                                        ).apply {
+                                            addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        }
+                                        context.startActivity(intent)
+                                    }
+                                },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color(0xFFF59E0B),
+                                    contentColor = Color(0xFF0F172A)
+                                ),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("🔓 一鍵前往開啟「顯示在其他應用程式上層」", fontWeight = FontWeight.Bold)
+                            }
+                        }
                     }
                 }
 
