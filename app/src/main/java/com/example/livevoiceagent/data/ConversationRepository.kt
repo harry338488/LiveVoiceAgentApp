@@ -69,6 +69,11 @@ class ConversationRepository(private val context: Context) {
             wakeWordMaxDurationSec = prefs.getInt("wakeWordMaxDurationSec", 90),
             wakeWordBringAppToFront = prefs.getBoolean("wakeWordBringAppToFront", false),
             autoStartCallOnAppLaunch = prefs.getBoolean("autoStartCallOnAppLaunch", false),
+            floatingVoicePillEnabled = prefs.getBoolean("floatingVoicePillEnabled", true),
+            wakeWordSmartContextOnly = prefs.getBoolean("wakeWordSmartContextOnly", false),
+            wakeWordOfflineDtwEnabled = prefs.getBoolean("wakeWordOfflineDtwEnabled", true),
+            savedPlaceAliases = prefs.getString("savedPlaceAliases", "") ?: "",
+            parkedCarInfoJson = prefs.getString("parkedCarInfoJson", "") ?: "",
             translationTargetLanguage = prefs.getString("translationTargetLanguage", "zh") ?: "zh",
             translationSecondaryLanguage = prefs.getString("translationSecondaryLanguage", "ja") ?: "ja",
             customGlossaryTerms = prefs.getString("customGlossaryTerms", "") ?: "",
@@ -124,6 +129,11 @@ class ConversationRepository(private val context: Context) {
             putInt("wakeWordMaxDurationSec", settings.wakeWordMaxDurationSec.coerceIn(30, 600))
             putBoolean("wakeWordBringAppToFront", settings.wakeWordBringAppToFront)
             putBoolean("autoStartCallOnAppLaunch", settings.autoStartCallOnAppLaunch)
+            putBoolean("floatingVoicePillEnabled", settings.floatingVoicePillEnabled)
+            putBoolean("wakeWordSmartContextOnly", settings.wakeWordSmartContextOnly)
+            putBoolean("wakeWordOfflineDtwEnabled", settings.wakeWordOfflineDtwEnabled)
+            putString("savedPlaceAliases", settings.savedPlaceAliases)
+            putString("parkedCarInfoJson", settings.parkedCarInfoJson)
             putString("translationTargetLanguage", settings.translationTargetLanguage.trim())
             putString("translationSecondaryLanguage", settings.translationSecondaryLanguage.trim())
             putString("customGlossaryTerms", settings.customGlossaryTerms)

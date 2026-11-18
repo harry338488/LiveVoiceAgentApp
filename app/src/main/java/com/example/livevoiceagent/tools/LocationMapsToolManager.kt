@@ -218,6 +218,12 @@ class LocationMapsToolManager(
                     argsJson = argsJson,
                     googleMapsApiKey = googleMapsApiKey
                 )
+                "save_place_alias" -> executeSavePlaceAlias(argsJson)
+                "save_parking_location" -> executeSaveParkingLocation(argsJson)
+                "find_my_parked_car" -> executeFindMyParkedCar()
+                "set_alarm_or_timer" -> executeSetAlarmOrTimer(argsJson)
+                "make_phone_call" -> executeMakePhoneCall(argsJson)
+                "read_recent_notifications" -> executeReadRecentNotifications(argsJson)
                 "end_live_voice_session" -> executeEndLiveVoiceSession(argsJson)
                 else -> LocationToolExecutionResult(
                     toolOutputJson = JSONObject().put("status", "error")
@@ -748,14 +754,20 @@ class LocationMapsToolManager(
         argsJson: JSONObject,
         googleMapsApiKey: String
     ): LocationToolExecutionResult {
-        val destination = argsJson.optString("destination", "").trim()
-        if (destination.isBlank()) {
+        val rawDestination = argsJson.optString("destination", "").trim()
+        if (rawDestination.isBlank()) {
             return LocationToolExecutionResult(
                 toolOutputJson = JSONObject().put("status", "error")
                     .put("message", "缺少目的地 (destination)").toString(),
                 actionLogText = "⚠️ 導航缺少目的地"
             )
         }
+        // Check if user said "帶我去找我的車 / 找車"
+        if (rawDestination.contains("我的車") || rawDestination.contains("停車處") || rawDestination == "找車") {
+            return executeFindMyParkedCar()
+        }
+        // Resolve saved alias (e.g. "回家" / "我家" / "公司" -> exact saved street address)
+        val destination = resolvePlaceAlias(rawDestination)
 
         val originArg = argsJson.optString("origin", "").trim()
         val rawMode = argsJson.optString("travel_mode", "walking").lowercase().trim()
@@ -852,7 +864,17 @@ class LocationMapsToolManager(
         val distText = resolved?.distanceMeters?.let { d ->
             if (d >= 1000) String.format(Locale.US, "%.1f 公里", d / 1000.0) else "$d 公尺"
         }
-        val metaLine = listOfNotNull(modeLabel, distText?.let { "距離約 $it" }, if (resolved?.pickedNearest == true) "最近分店" else null)
+        val trafficEta = if (snap != null && resolved != null && googleMapsApiKey.isNotBlank()) {
+            queryGoogleRoutesTrafficEta(
+                apiKey = googleMapsApiKey.trim(),
+                originLat = snap.latitude,
+                originLon = snap.longitude,
+                destLat = resolved.latitude,
+                destLon = resolved.longitude,
+                travelMode = travelMode
+            )
+        } else null
+        val metaLine = listOfNotNull(modeLabel, trafficEta ?: distText?.let { "距離約 $it" }, if (resolved?.pickedNearest == true) "最近分店" else null)
             .joinToString(" · ")
 
         val mapSource = SearchSource(
@@ -867,6 +889,7 @@ class LocationMapsToolManager(
             put("resolved_place_name", finalLabel)
             put("resolved_address", resolved?.address ?: "")
             distText?.let { put("distance_from_user", it) }
+            trafficEta?.let { put("traffic_eta_summary", it) }
             put("picked_nearest_branch", resolved?.pickedNearest == true)
             put("resolver", resolved?.provider ?: "Google Maps App 自行搜尋")
             if (!resolved?.alternatives.isNullOrEmpty()) put("other_candidates", JSONArray(resolved!!.alternatives))
@@ -875,9 +898,10 @@ class LocationMapsToolManager(
             put("google_maps_navigation_url", universalMapsUrl)
             put("launched_google_maps_app", autoLaunch)
             put("already_launched_moments_ago", alreadyLaunched)
+            val etaPhrase = trafficEta?.let { "（$it）" } ?: distText?.let { "（距離約 $it）" } ?: ""
             put(
                 "message",
-                "已直接跳轉手機 Google Maps 導航至「$finalLabel」${distText?.let { "（距離約 $it）" } ?: ""}（模式：$modeLabel），無須手動點擊！請只用一句話告知使用者，例如『已經幫你導航到$finalLabel！』，不要再重複呼叫導航工具。若使用者表示不是這個地點，再依其補充重新呼叫。"
+                "已直接跳轉手機 Google Maps 導航至「$finalLabel」$etaPhrase（模式：$modeLabel），無須手動點擊！請只用一句話告知使用者，例如『已經幫你導航到$finalLabel$etaPhrase！』，不要再重複呼叫導航工具。若使用者表示不是這個地點，再依其補充重新呼叫。"
             )
         }.toString()
 
@@ -970,6 +994,322 @@ class LocationMapsToolManager(
         }.getOrDefault(false)
     }
 
+    private fun resolvePlaceAlias(rawQuery: String): String {
+        val prefs = context.getSharedPreferences("live_voice_agent_prefs", Context.MODE_PRIVATE)
+        val rawAliases = prefs.getString("savedPlaceAliases", "").orEmpty()
+        if (rawAliases.isBlank()) return rawQuery
+        val map = mutableMapOf<String, String>()
+        rawAliases.lines().forEach { line ->
+            val idx = line.indexOf('=')
+            if (idx > 0) {
+                val k = line.substring(0, idx).trim().lowercase(Locale.ROOT)
+                val v = line.substring(idx + 1).trim()
+                if (k.isNotBlank() && v.isNotBlank()) {
+                    map[k] = v
+                }
+            }
+        }
+        val clean = rawQuery.trim().lowercase(Locale.ROOT)
+            .removePrefix("回").removePrefix("去").removePrefix("到").trim()
+        map[clean]?.let { return it }
+        if ((clean == "家" || clean == "我家" || clean == "家裡") && (map.containsKey("家") || map.containsKey("我家"))) {
+            return map["家"] ?: map["我家"] ?: rawQuery
+        }
+        if ((clean == "公司" || clean == "辦公室") && (map.containsKey("公司") || map.containsKey("辦公室"))) {
+            return map["公司"] ?: map["辦公室"] ?: rawQuery
+        }
+        return rawQuery
+    }
+
+    private fun executeSavePlaceAlias(argsJson: JSONObject): LocationToolExecutionResult {
+        val alias = argsJson.optString("alias", "").trim()
+        val address = argsJson.optString("address", "").trim()
+        if (alias.isBlank() || address.isBlank()) {
+            return LocationToolExecutionResult(
+                toolOutputJson = JSONObject().put("status", "error").put("message", "請提供別名 (alias) 與地址 (address)").toString(),
+                actionLogText = "⚠️ 儲存常用地點失敗：缺少別名或地址"
+            )
+        }
+        val prefs = context.getSharedPreferences("live_voice_agent_prefs", Context.MODE_PRIVATE)
+        val existingLines = prefs.getString("savedPlaceAliases", "").orEmpty().lines().filter { it.isNotBlank() }.toMutableList()
+        existingLines.removeAll { it.substringBefore('=').trim().equals(alias, ignoreCase = true) }
+        existingLines.add("$alias=$address")
+        val updated = existingLines.joinToString("\n")
+        prefs.edit().putString("savedPlaceAliases", updated).apply()
+
+        val out = JSONObject().apply {
+            put("status", "success")
+            put("alias", alias)
+            put("address", address)
+            put("message", "已將常用地點「$alias」儲存為「$address」！日後只要說『導航回$alias / 去$alias』即可秒開導航。")
+        }.toString()
+        return LocationToolExecutionResult(
+            toolOutputJson = out,
+            actionLogText = "🏠 已記憶常用地點：【$alias】➔ $address"
+        )
+    }
+
+    private fun executeSaveParkingLocation(argsJson: JSONObject): LocationToolExecutionResult {
+        val note = argsJson.optString("note", "").trim().ifBlank { "無額外樓層/車位備註" }
+        val snap = getCurrentLocationSnapshot(allowBlockingGeocode = true)
+        val prefs = context.getSharedPreferences("live_voice_agent_prefs", Context.MODE_PRIVATE)
+        val timeStr = java.text.SimpleDateFormat("MM/dd HH:mm", Locale.getDefault()).format(java.util.Date())
+        val json = JSONObject().apply {
+            put("latitude", snap?.latitude ?: 0.0)
+            put("longitude", snap?.longitude ?: 0.0)
+            put("address", snap?.addressLine ?: "僅記錄備註（未取得 GPS）")
+            put("note", note)
+            put("saved_at", timeStr)
+        }
+        prefs.edit().putString("parkedCarInfoJson", json.toString()).apply()
+
+        val out = JSONObject().apply {
+            put("status", "success")
+            put("parking_info", json)
+            put("message", "已為您記住停車位置（地址：${snap?.addressLine ?: "目前位置"}，備註：$note，時間：$timeStr）。要找車時只要說『帶我去找我的車』即可直接步行導航！")
+        }.toString()
+        return LocationToolExecutionResult(
+            toolOutputJson = out,
+            actionLogText = "🅿️ 已記住停車位置：${snap?.addressLine ?: ""}（備註：$note · $timeStr）"
+        )
+    }
+
+    private fun executeFindMyParkedCar(): LocationToolExecutionResult {
+        val prefs = context.getSharedPreferences("live_voice_agent_prefs", Context.MODE_PRIVATE)
+        val raw = prefs.getString("parkedCarInfoJson", "").orEmpty()
+        if (raw.isBlank()) {
+            return LocationToolExecutionResult(
+                toolOutputJson = JSONObject().put("status", "not_found")
+                    .put("message", "目前尚未儲存任何停車位置紀錄。停車時可對我說『記一下我把車停在 B2 35號』！").toString(),
+                actionLogText = "🅿️ 尚無已儲存的停車位置紀錄"
+            )
+        }
+        val info = runCatching { JSONObject(raw) }.getOrNull() ?: JSONObject()
+        val lat = info.optDouble("latitude", 0.0)
+        val lon = info.optDouble("longitude", 0.0)
+        val addr = info.optString("address", "停車位置")
+        val note = info.optString("note", "無備註")
+        val savedAt = info.optString("saved_at", "")
+        val snap = getCurrentLocationSnapshot(allowBlockingGeocode = false)
+        val distM = distanceTo(snap, lat, lon)
+        val distStr = distM?.let { "距離目前位置約 ${it} 公尺" } ?: ""
+
+        if (lat != 0.0 || lon != 0.0) {
+            val primaryUri = "google.navigation:q=$lat,$lon&mode=w"
+            val webUrl = "https://www.google.com/maps/dir/?api=1&destination=$lat,$lon&travelmode=walking&dir_action=navigate"
+            Handler(Looper.getMainLooper()).post {
+                launchGoogleMapsIntent(primaryUri, webUrl, "🅿️ 停車位置 ($note)")
+            }
+            onAutoLaunchGoogleMaps?.invoke(primaryUri, webUrl, "🅿️ 停車位置 ($note)")
+        }
+
+        val out = JSONObject().apply {
+            put("status", "success")
+            put("address", addr)
+            put("note", note)
+            put("saved_at", savedAt)
+            put("distance", distStr)
+            put("message", "已為您自動開啟返回停車位置的步行導航！您的車停在「$addr」（車位備註：$note，記錄時間：$savedAt，$distStr）。")
+        }.toString()
+        return LocationToolExecutionResult(
+            toolOutputJson = out,
+            actionLogText = "🅿️ 尋找愛車導航：$addr（備註：$note · $distStr）",
+            autoLaunchedNavigation = true
+        )
+    }
+
+    private fun queryGoogleRoutesTrafficEta(
+        apiKey: String,
+        originLat: Double,
+        originLon: Double,
+        destLat: Double,
+        destLon: Double,
+        travelMode: String
+    ): String? {
+        return runCatching {
+            val routeMode = when (travelMode) {
+                "driving" -> "DRIVE"
+                "bicycling" -> "BICYCLE"
+                "walking" -> "WALK"
+                else -> "TRANSIT"
+            }
+            val payload = JSONObject().apply {
+                put("origin", JSONObject().put("location", JSONObject().put("latLng", JSONObject().put("latitude", originLat).put("longitude", originLon))))
+                put("destination", JSONObject().put("location", JSONObject().put("latLng", JSONObject().put("latitude", destLat).put("longitude", destLon))))
+                put("travelMode", routeMode)
+                if (routeMode == "DRIVE") {
+                    put("routingPreference", "TRAFFIC_AWARE")
+                }
+            }
+            val req = Request.Builder()
+                .url("https://routes.googleapis.com/directions/v2:computeRoutes")
+                .addHeader("Content-Type", "application/json")
+                .addHeader("X-Goog-Api-Key", apiKey)
+                .addHeader("X-Goog-FieldMask", "routes.duration,routes.distanceMeters")
+                .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+                .build()
+            httpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@use null
+                val body = resp.body?.string().orEmpty()
+                val route = JSONObject(body).optJSONArray("routes")?.optJSONObject(0) ?: return@use null
+                val durSec = route.optString("duration", "").removeSuffix("s").toIntOrNull() ?: return@use null
+                val distM = route.optInt("distanceMeters", 0)
+                val min = (durSec / 60.0).roundToInt().coerceAtLeast(1)
+                val distLabel = if (distM >= 1000) String.format(Locale.US, "%.1f 公里", distM / 1000.0) else "${distM} 公尺"
+                "預計約 $min 分鐘（$distLabel）"
+            }
+        }.getOrNull()
+    }
+
+    private fun executeSetAlarmOrTimer(argsJson: JSONObject): LocationToolExecutionResult {
+        val actionType = argsJson.optString("type", "alarm").lowercase(Locale.ROOT)
+        val label = argsJson.optString("label", "Luna 提醒").ifBlank { "Luna 提醒" }
+        return if (actionType.contains("timer") || argsJson.has("duration_seconds") && argsJson.optInt("duration_seconds", 0) > 0) {
+            val seconds = argsJson.optInt("duration_seconds", 60).coerceAtLeast(5)
+            Handler(Looper.getMainLooper()).post {
+                runCatching {
+                    val intent = Intent(android.provider.AlarmClock.ACTION_SET_TIMER).apply {
+                        putExtra(android.provider.AlarmClock.EXTRA_LENGTH, seconds)
+                        putExtra(android.provider.AlarmClock.EXTRA_MESSAGE, label)
+                        putExtra(android.provider.AlarmClock.EXTRA_SKIP_UI, true)
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    context.startActivity(intent)
+                }
+            }
+            val min = seconds / 60
+            val sec = seconds % 60
+            val timeDesc = if (min > 0) "${min}分${if (sec > 0) "${sec}秒" else ""}" else "${sec}秒"
+            val out = JSONObject().apply {
+                put("status", "success")
+                put("type", "timer")
+                put("duration_seconds", seconds)
+                put("label", label)
+                put("message", "已直接為您啟動 $timeDesc 的系統倒數計時器（標籤：$label）！")
+            }.toString()
+            LocationToolExecutionResult(
+                toolOutputJson = out,
+                actionLogText = "⏱️ 已啟動系統倒數計時器：$timeDesc（$label）"
+            )
+        } else {
+            val hour = argsJson.optInt("hour", 7).coerceIn(0, 23)
+            val minute = argsJson.optInt("minute", 0).coerceIn(0, 59)
+            Handler(Looper.getMainLooper()).post {
+                runCatching {
+                    val intent = Intent(android.provider.AlarmClock.ACTION_SET_ALARM).apply {
+                        putExtra(android.provider.AlarmClock.EXTRA_HOUR, hour)
+                        putExtra(android.provider.AlarmClock.EXTRA_MINUTES, minute)
+                        putExtra(android.provider.AlarmClock.EXTRA_MESSAGE, label)
+                        putExtra(android.provider.AlarmClock.EXTRA_SKIP_UI, true)
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    context.startActivity(intent)
+                }
+            }
+            val timeFmt = String.format(Locale.US, "%02d:%02d", hour, minute)
+            val out = JSONObject().apply {
+                put("status", "success")
+                put("type", "alarm")
+                put("time", timeFmt)
+                put("label", label)
+                put("message", "已直接為您設定 $timeFmt 的手機系統鬧鐘（標籤：$label）！")
+            }.toString()
+            LocationToolExecutionResult(
+                toolOutputJson = out,
+                actionLogText = "⏰ 已設定系統鬧鐘：$timeFmt（$label）"
+            )
+        }
+    }
+
+    private fun executeMakePhoneCall(argsJson: JSONObject): LocationToolExecutionResult {
+        val rawNumber = argsJson.optString("phone_number", "").trim()
+        val contactName = argsJson.optString("contact_name", "").trim()
+        var resolvedNumber = rawNumber
+        var resolvedLabel = contactName.ifBlank { rawNumber }
+
+        if (resolvedNumber.isBlank() && contactName.isNotBlank()) {
+            val hasContactsPerm = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.READ_CONTACTS
+            ) == PackageManager.PERMISSION_GRANTED
+            if (hasContactsPerm) {
+                runCatching {
+                    val uri = android.provider.ContactsContract.CommonDataKinds.Phone.CONTENT_URI
+                    val proj = arrayOf(
+                        android.provider.ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+                        android.provider.ContactsContract.CommonDataKinds.Phone.NUMBER
+                    )
+                    context.contentResolver.query(
+                        uri,
+                        proj,
+                        "${android.provider.ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} LIKE ?",
+                        arrayOf("%$contactName%"),
+                        null
+                    )?.use { cursor ->
+                        if (cursor.moveToFirst()) {
+                            resolvedLabel = cursor.getString(0).orEmpty().ifBlank { contactName }
+                            resolvedNumber = cursor.getString(1).orEmpty().trim()
+                        }
+                    }
+                }
+            } else {
+                return LocationToolExecutionResult(
+                    toolOutputJson = JSONObject().put("status", "permission_required")
+                        .put("message", "尚未授權讀取手機聯絡人權限 (READ_CONTACTS)，請提醒使用者授權聯絡人權限或直接口頭念出電話號碼。").toString(),
+                    actionLogText = "📞 撥打聯絡人需要 READ_CONTACTS 權限"
+                )
+            }
+        }
+
+        if (resolvedNumber.isBlank()) {
+            return LocationToolExecutionResult(
+                toolOutputJson = JSONObject().put("status", "not_found")
+                    .put("message", "找不到聯絡人「$contactName」的電話號碼，請向使用者確認電話號碼。").toString(),
+                actionLogText = "📞 找不到「$contactName」的電話號碼"
+            )
+        }
+
+        val hasCallPerm = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.CALL_PHONE
+        ) == PackageManager.PERMISSION_GRANTED
+
+        Handler(Looper.getMainLooper()).post {
+            runCatching {
+                val action = if (hasCallPerm) Intent.ACTION_CALL else Intent.ACTION_DIAL
+                val callIntent = Intent(action, Uri.parse("tel:${Uri.encode(resolvedNumber)}")).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(callIntent)
+            }
+        }
+
+        val out = JSONObject().apply {
+            put("status", "success")
+            put("target", resolvedLabel)
+            put("phone_number", resolvedNumber)
+            put("direct_call", hasCallPerm)
+            put("message", if (hasCallPerm) "已直接為您撥打電話給「$resolvedLabel」($resolvedNumber)！" else "已為您開啟「$resolvedLabel」($resolvedNumber) 的撥號畫面！")
+        }.toString()
+        return LocationToolExecutionResult(
+            toolOutputJson = out,
+            actionLogText = "📞 語音撥號：$resolvedLabel ($resolvedNumber)"
+        )
+    }
+
+    private fun executeReadRecentNotifications(argsJson: JSONObject): LocationToolExecutionResult {
+        val appFilter = argsJson.optString("app_filter", "").trim()
+        val formatted = LunaNotificationListenerService.formatRecentNotificationsForLlm(context, appFilter)
+        val out = JSONObject().apply {
+            put("status", "success")
+            put("notifications_summary", formatted)
+        }.toString()
+        return LocationToolExecutionResult(
+            toolOutputJson = out,
+            actionLogText = "📬 讀取最新手機通知${if (appFilter.isNotBlank()) "（篩選：$appFilter）" else ""}"
+        )
+    }
+
     companion object {
         const val NAVIGATION_RULES =
             "【導航規則】①只要使用者表達想前往某地（導航到/帶我去/我要去/去…怎麼走/開車騎車走路去…），一律立即呼叫 open_google_maps_navigation 直接跳轉，不需要使用者說「跳轉」，也不要先反問。" +
@@ -1040,6 +1380,12 @@ class LocationMapsToolManager(
             "get_user_current_location",
             "search_nearby_places_with_linkup",
             "open_google_maps_navigation",
+            "save_place_alias",
+            "save_parking_location",
+            "find_my_parked_car",
+            "set_alarm_or_timer",
+            "make_phone_call",
+            "read_recent_notifications",
             "end_live_voice_session"
         )
 
@@ -1135,6 +1481,130 @@ class LocationMapsToolManager(
                             })
                         })
                         put("required", JSONArray().put("reason"))
+                    })
+                },
+                JSONObject().apply {
+                    put("type", "function")
+                    put("name", "save_place_alias")
+                    put(
+                        "description",
+                        "當使用者告訴你他的常用地點地址（例如『記住我家在北投區…』、『我公司在信義區…』、『把這裡設為我家』）時呼叫，儲存常用地點別名，日後說『導航回家/去公司』即可直接導航。"
+                    )
+                    put("parameters", JSONObject().apply {
+                        put("type", "object")
+                        put("properties", JSONObject().apply {
+                            put("alias", JSONObject().apply {
+                                put("type", "string")
+                                put("description", "地點別名，例如：『家』、『公司』、『爸媽家』、『健身房』")
+                            })
+                            put("address", JSONObject().apply {
+                                put("type", "string")
+                                put("description", "完整地址或地標名稱")
+                            })
+                        })
+                        put("required", JSONArray().put("alias").put("address"))
+                    })
+                },
+                JSONObject().apply {
+                    put("type", "function")
+                    put("name", "save_parking_location")
+                    put(
+                        "description",
+                        "當使用者說『記一下我把車停在這裡』、『記住我的停車位置在 B2 35號柱』時呼叫，自動記錄手機當下的 GPS 座標與車位樓層備註。"
+                    )
+                    put("parameters", JSONObject().apply {
+                        put("type", "object")
+                        put("properties", JSONObject().apply {
+                            put("note", JSONObject().apply {
+                                put("type", "string")
+                                put("description", "使用者口述的停車樓層、區域或柱子編號，例如：『B2 35號柱』、『路邊停車格』")
+                            })
+                        })
+                    })
+                },
+                JSONObject().apply {
+                    put("type", "function")
+                    put("name", "find_my_parked_car")
+                    put(
+                        "description",
+                        "當使用者詢問『我的車停在哪裡？』、『帶我去找我的車』時呼叫，會回傳當時記錄的車位備註並直接開啟返回停車位置的步行導航。"
+                    )
+                    put("parameters", JSONObject().apply {
+                        put("type", "object")
+                        put("properties", JSONObject())
+                    })
+                },
+                JSONObject().apply {
+                    put("type", "function")
+                    put("name", "set_alarm_or_timer")
+                    put(
+                        "description",
+                        "當使用者要求『幫我設鬧鐘（例如明天早上7點半）』或『幫我設倒數計時器（例如倒數10分鐘）』時呼叫，直接免點擊設定手機系統鬧鐘或計時器。"
+                    )
+                    put("parameters", JSONObject().apply {
+                        put("type", "object")
+                        put("properties", JSONObject().apply {
+                            put("type", JSONObject().apply {
+                                put("type", "string")
+                                put("enum", JSONArray().put("alarm").put("timer"))
+                                put("description", "alarm (特定幾點幾分的鬧鐘) 或 timer (倒數計時器)")
+                            })
+                            put("hour", JSONObject().apply {
+                                put("type", "integer")
+                                put("description", "（鬧鐘用）24小時制的小時 (0~23)")
+                            })
+                            put("minute", JSONObject().apply {
+                                put("type", "integer")
+                                put("description", "（鬧鐘用）分鐘 (0~59)")
+                            })
+                            put("duration_seconds", JSONObject().apply {
+                                put("type", "integer")
+                                put("description", "（計時器用）倒數總秒數，例如 10 分鐘為 600")
+                            })
+                            put("label", JSONObject().apply {
+                                put("type", "string")
+                                put("description", "鬧鐘或計時器標籤名稱")
+                            })
+                        })
+                        put("required", JSONArray().put("type"))
+                    })
+                },
+                JSONObject().apply {
+                    put("type", "function")
+                    put("name", "make_phone_call")
+                    put(
+                        "description",
+                        "當使用者要求『打電話給某人（手機聯絡人）』或『幫我打電話給這家餐廳/撥打某個電話號碼』時呼叫。"
+                    )
+                    put("parameters", JSONObject().apply {
+                        put("type", "object")
+                        put("properties", JSONObject().apply {
+                            put("contact_name", JSONObject().apply {
+                                put("type", "string")
+                                put("description", "聯絡人或店家名稱")
+                            })
+                            put("phone_number", JSONObject().apply {
+                                put("type", "string")
+                                put("description", "（選填）若已知電話號碼則直接填入；若只知聯絡人姓名則留空由系統自動查詢通訊錄")
+                            })
+                        })
+                    })
+                },
+                JSONObject().apply {
+                    put("type", "function")
+                    put("name", "read_recent_notifications")
+                    put(
+                        "description",
+                        "當使用者詢問『剛剛有誰傳訊息給我？』、『LINE 有新訊息嗎？』、『幫我唸一下最新的手機通知』時呼叫，讀取手機最新收到的通知內容。"
+                    )
+                    put("parameters", JSONObject().apply {
+                        put("type", "object")
+                        put("properties", JSONObject().apply {
+                            put("app_filter", JSONObject().apply {
+                                put("type", "string")
+                                put("description", "（選填）篩選特定 App 名稱，如『LINE』、『Gmail』、『訊息』；若留空則讀取所有最新通知")
+                            })
+                        })
                     })
                 }
             )

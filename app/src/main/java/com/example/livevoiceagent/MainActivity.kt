@@ -57,6 +57,10 @@ class MainActivity : ComponentActivity() {
 
         window.statusBarColor = Color(0xFF080C14).toArgb()
         window.navigationBarColor = Color(0xFF0B1120).toArgb()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        }
 
         // Google Maps is launched directly by LocationMapsToolManager (works in foreground AND background);
         // the Activity only shows a confirmation toast to avoid double-launching Maps.

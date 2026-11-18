@@ -328,6 +328,16 @@ data class AppSettings(
     val wakeWordBringAppToFront: Boolean = false,
     /** When true, opening the App (launcher / "Hey Google, 開啟 App" / shortcut) auto-starts a hands-free Live Chat. */
     val autoStartCallOnAppLaunch: Boolean = false,
+    /** Shows a draggable mini floating voice pill (Dynamic Island style) when conversing in the background. */
+    val floatingVoicePillEnabled: Boolean = true,
+    /** Only keep wake-word mic standby active while charging or connected to Bluetooth audio (frees Hey Google otherwise). */
+    val wakeWordSmartContextOnly: Boolean = false,
+    /** Enables 100% on-device DTW + voiceprint instant wake-up when acoustic template strongly matches enrolled profile. */
+    val wakeWordOfflineDtwEnabled: Boolean = true,
+    /** Saved place aliases (one per line, e.g. "家=台北市北投區..." or "公司=..."). */
+    val savedPlaceAliases: String = "",
+    /** JSON storing the user's last parked car location, floor/pillar note, and timestamp. */
+    val parkedCarInfoJson: String = "",
     val translationTargetLanguage: String = "zh",
     val translationSecondaryLanguage: String = "ja",
     val customGlossaryTerms: String = "",

@@ -39,7 +39,8 @@ data class VoiceprintProfile(
     val meanPitchHz: Float,
     val pitchStdHz: Float,
     val meanZcr: Float,
-    val bandEnergies: FloatArray
+    val bandEnergies: FloatArray,
+    val temporalEnvelope: FloatArray = FloatArray(0)
 ) {
     fun toJsonString(): String = JSONObject().apply {
         put("sampleCount", sampleCount)
@@ -49,6 +50,11 @@ data class VoiceprintProfile(
         val arr = JSONArray()
         bandEnergies.forEach { arr.put(it.toDouble()) }
         put("bandEnergies", arr)
+        if (temporalEnvelope.isNotEmpty()) {
+            val envArr = JSONArray()
+            temporalEnvelope.forEach { envArr.put(it.toDouble()) }
+            put("temporalEnvelope", envArr)
+        }
     }.toString()
 
     companion object {
@@ -62,12 +68,19 @@ data class VoiceprintProfile(
                 if (count <= 0) return null
                 val arr = obj.optJSONArray("bandEnergies") ?: return null
                 val bands = FloatArray(arr.length()) { idx -> arr.optDouble(idx, 0.0).toFloat() }
+                val envArr = obj.optJSONArray("temporalEnvelope")
+                val env = if (envArr != null && envArr.length() > 0) {
+                    FloatArray(envArr.length()) { idx -> envArr.optDouble(idx, 0.0).toFloat() }
+                } else {
+                    FloatArray(0)
+                }
                 VoiceprintProfile(
                     sampleCount = count,
                     meanPitchHz = obj.optDouble("meanPitchHz", 160.0).toFloat(),
                     pitchStdHz = obj.optDouble("pitchStdHz", 35.0).toFloat(),
                     meanZcr = obj.optDouble("meanZcr", 0.08).toFloat(),
-                    bandEnergies = bands
+                    bandEnergies = bands,
+                    temporalEnvelope = env
                 )
             }.getOrNull()
         }
@@ -122,6 +135,10 @@ class WakeWordManager(
     private var voiceprintEnabled: Boolean = true
     @Volatile
     private var enrolledProfile: VoiceprintProfile? = null
+    @Volatile
+    private var smartContextOnly: Boolean = false
+    @Volatile
+    private var offlineDtwEnabled: Boolean = true
 
     private var lastTriggerWallMs: Long = 0L
 
@@ -167,11 +184,17 @@ class WakeWordManager(
                     }
                     val callOrVoipBusy = isExternalCallOrCommunicationModeActive()
                     val otherRecBusy = hasOtherAppActiveRecording()
+                    val contextBlocked = smartContextOnly && !isSmartContextSatisfied()
 
                     if (callOrVoipBusy || otherRecBusy) {
                         clearChecks = 0
                         if (standbyJob?.isActive == true) {
                             yieldMicrophoneForExternalApp("📞 偵測到電話或通訊軟體(LINE等)通話中，已自動釋放麥克風禮讓")
+                        }
+                    } else if (contextBlocked) {
+                        clearChecks = 0
+                        if (standbyJob?.isActive == true) {
+                            yieldMicrophoneForExternalApp("🔋 智慧情境待機：未充電且未連藍牙耳機/車機，已釋放麥克風讓 Hey Google 正常運作")
                         }
                     } else if (isYieldingForExternalAudio || standbyJob?.isActive != true) {
                         clearChecks++
@@ -223,8 +246,31 @@ class WakeWordManager(
         notifyStatusOnMain(false, statusReason)
     }
 
+    private fun isSmartContextSatisfied(): Boolean {
+        val isCharging = runCatching {
+            val bm = context.getSystemService(Context.BATTERY_SERVICE) as android.os.BatteryManager
+            bm.isCharging
+        }.getOrDefault(false)
+        if (isCharging) return true
+
+        val hasBluetoothAudio = runCatching {
+            val devices = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+            devices.any { d ->
+                d.type == android.media.AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
+                        d.type == android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+                        (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && (
+                                d.type == android.media.AudioDeviceInfo.TYPE_BLE_HEADSET ||
+                                        d.type == android.media.AudioDeviceInfo.TYPE_BLE_SPEAKER
+                                ))
+            }
+        }.getOrDefault(false)
+        return hasBluetoothAudio
+    }
+
     fun startStandby(settings: AppSettings) {
         openAiApiKey = settings.openAiApiKey.trim()
+        smartContextOnly = settings.wakeWordSmartContextOnly
+        offlineDtwEnabled = settings.wakeWordOfflineDtwEnabled
         configure(
             enabled = settings.wakeWordEnabled,
             wakePhrase = settings.wakeWordPhrase,
@@ -346,6 +392,11 @@ class WakeWordManager(
             if (isExternalCallOrCommunicationModeActive() || hasOtherAppActiveRecording()) {
                 isYieldingForExternalAudio = true
                 notifyStatusOnMain(false, "📞 偵測到電話或通訊軟體(LINE等)使用麥克風中，已自動禮讓")
+                return@launch
+            }
+            if (smartContextOnly && !isSmartContextSatisfied()) {
+                isYieldingForExternalAudio = true
+                notifyStatusOnMain(false, "🔋 智慧情境待機：未充電且未連藍牙耳機/車機，已釋放麥克風讓 Hey Google 運作")
                 return@launch
             }
 
@@ -578,6 +629,27 @@ class WakeWordManager(
                 )
                 return false
             }
+
+            // ⚡ 100% On-Device Offline DTW + Voiceprint Instant Wake-Up (0 API cost, ~0.25s latency!)
+            val dtwSim = computeDtwEnvelopeSimilarity(profile.temporalEnvelope, candidateProfile.temporalEnvelope)
+            val durationSec = pcmSamples.size.toFloat() / sampleRate.coerceAtLeast(1)
+            if (offlineDtwEnabled &&
+                profile.temporalEnvelope.isNotEmpty() &&
+                similarityScore >= 81 &&
+                dtwSim >= 0.77f &&
+                durationSec in 1.05f..3.15f
+            ) {
+                lastTriggerWallMs = System.currentTimeMillis()
+                isPausedForActiveCall = true
+                runCatching { activeRecorderToReleaseOnTrigger.stop() }
+                runCatching { activeRecorderToReleaseOnTrigger.release() }
+                delay(180L)
+                withContext(Dispatchers.Main) {
+                    playWakeChimeAndVibrate()
+                    onWakeWordDetected("$targetWakePhrase (⚡離線DTW直通)", similarityScore)
+                }
+                return true
+            }
         }
 
         val apiKey = openAiApiKey.trim()
@@ -771,12 +843,20 @@ class WakeWordManager(
                     val pVal = prior.bandEnergies.getOrElse(i) { extracted.bandEnergies[i] }
                     (pVal * wPrior + extracted.bandEnergies[i] * wNew) / totalW
                 }
+                val mergedEnv = if (extracted.temporalEnvelope.isNotEmpty() && prior.temporalEnvelope.size == extracted.temporalEnvelope.size) {
+                    FloatArray(extracted.temporalEnvelope.size) { i ->
+                        (prior.temporalEnvelope[i] * wPrior + extracted.temporalEnvelope[i] * wNew) / totalW
+                    }
+                } else {
+                    extracted.temporalEnvelope
+                }
                 VoiceprintProfile(
                     sampleCount = (prior.sampleCount + 1).coerceAtMost(5),
                     meanPitchHz = (prior.meanPitchHz * wPrior + extracted.meanPitchHz * wNew) / totalW,
                     pitchStdHz = (prior.pitchStdHz * wPrior + extracted.pitchStdHz * wNew) / totalW,
                     meanZcr = (prior.meanZcr * wPrior + extracted.meanZcr * wNew) / totalW,
-                    bandEnergies = mergedBands
+                    bandEnergies = mergedBands,
+                    temporalEnvelope = mergedEnv
                 )
             }
 
@@ -896,13 +976,54 @@ class WakeWordManager(
         val norm = sqrt(normSq.coerceAtLeast(1e-6f))
         val normalizedBands = FloatArray(8) { i -> bandAccum[i] / norm }
 
+        // Extract 12-segment temporal syllable envelope across the active utterance for DTW matching
+        val bins = 12
+        val temporalEnv = FloatArray(bins)
+        val segLen = (length / bins).coerceAtLeast(1)
+        var maxSegRms = 1e-4f
+        for (b in 0 until bins) {
+            val sIdx = b * segLen
+            val eIdx = minOf(length, sIdx + segLen)
+            var sq = 0.0
+            for (i in sIdx until eIdx) {
+                val v = samples[i].toDouble() / 32768.0
+                sq += v * v
+            }
+            val r = sqrt(sq / (eIdx - sIdx).coerceAtLeast(1)).toFloat()
+            temporalEnv[b] = r
+            if (r > maxSegRms) maxSegRms = r
+        }
+        for (b in 0 until bins) {
+            temporalEnv[b] = (temporalEnv[b] / maxSegRms).coerceIn(0f, 1f)
+        }
+
         return VoiceprintProfile(
             sampleCount = 1,
             meanPitchHz = meanPitch,
             pitchStdHz = pitchStd,
             meanZcr = meanZcr,
-            bandEnergies = normalizedBands
+            bandEnergies = normalizedBands,
+            temporalEnvelope = temporalEnv
         )
+    }
+
+    private fun computeDtwEnvelopeSimilarity(a: FloatArray, b: FloatArray): Float {
+        if (a.size < 6 || b.size < 6) return 0f
+        val n = a.size
+        val m = b.size
+        val dp = Array(n + 1) { FloatArray(m + 1) { 999f } }
+        dp[0][0] = 0f
+        for (i in 1..n) {
+            for (j in 1..m) {
+                if (abs(i - j) <= 3) {
+                    val cost = abs(a[i - 1] - b[j - 1])
+                    val prev = minOf(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1])
+                    dp[i][j] = cost + prev
+                }
+            }
+        }
+        val avgDist = dp[n][m] / ((n + m) * 0.5f)
+        return (1f - avgDist * 1.6f).coerceIn(0f, 1f)
     }
 
     private fun computeVoiceprintSimilarityScore(

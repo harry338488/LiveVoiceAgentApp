@@ -1376,6 +1376,24 @@ private fun SlimContextualModeHeaderBar(
                                 modifier = Modifier.padding(vertical = 5.dp)
                             )
                         }
+
+                        Surface(
+                            shape = RoundedCornerShape(50),
+                            color = Color(0xFFF59E0B).copy(alpha = 0.18f),
+                            border = BorderStroke(0.5.dp, Color(0xFFF59E0B).copy(alpha = 0.55f)),
+                            modifier = Modifier
+                                .weight(1f)
+                                .clickable { onTriggerTutorQuickAction("audio_flashcard_quiz") }
+                        ) {
+                            Text(
+                                text = "🎧 單字隨身抽考",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFFDE68A),
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.padding(vertical = 5.dp)
+                            )
+                        }
                     }
                 }
             }
@@ -4661,11 +4679,76 @@ private fun WakeWordAndVoiceprintDialog(
                             )
                         }
 
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    "💊 背景通話顯示「懸浮語音膠囊」",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                                Text(
+                                    "在背景對話時，於螢幕頂端顯示可拖曳的迷你動態島膠囊（含即時聲波、單行字幕與一鍵靜音/掛斷按鈕）",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFFCBD5E1)
+                                )
+                            }
+                            Switch(
+                                checked = settings.floatingVoicePillEnabled,
+                                onCheckedChange = { onUpdateSettings(settings.copy(floatingVoicePillEnabled = it)) }
+                            )
+                        }
+
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    "🔋 智慧情境待機（僅充電或連藍牙時開麥克風）",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                                Text(
+                                    "開啟後，只有在插上充電線或連上藍牙耳機/車機時才自動監聽喚醒詞；平時自動釋放麥克風讓 Hey Google 正常運作！",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFFCBD5E1)
+                                )
+                            }
+                            Switch(
+                                checked = settings.wakeWordSmartContextOnly,
+                                onCheckedChange = { onUpdateSettings(settings.copy(wakeWordSmartContextOnly = it)) }
+                            )
+                        }
+
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    "⚡ 本機離線 DTW + 聲紋秒喚醒（0 API 費用）",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                                Text(
+                                    "當您錄製過本人聲紋後，若聲紋與音節節奏 (DTW) 高度吻合 (≥81%)，手機會在 0.25 秒內直接離線喚醒，完全不經過 Whisper API！",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFFCBD5E1)
+                                )
+                            }
+                            Switch(
+                                checked = settings.wakeWordOfflineDtwEnabled,
+                                onCheckedChange = { onUpdateSettings(settings.copy(wakeWordOfflineDtwEnabled = it)) }
+                            )
+                        }
+
+                        var notifAccessGranted by remember {
+                            mutableStateOf(com.example.livevoiceagent.tools.LunaNotificationListenerService.isNotificationAccessEnabled(context))
+                        }
+
                         val powerManager = remember { context.getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager }
                         var ignoringBatteryOpt by remember { mutableStateOf(powerManager.isIgnoringBatteryOptimizations(context.packageName)) }
                         LaunchedEffect(Unit) {
                             while (true) {
                                 ignoringBatteryOpt = powerManager.isIgnoringBatteryOptimizations(context.packageName)
+                                notifAccessGranted = com.example.livevoiceagent.tools.LunaNotificationListenerService.isNotificationAccessEnabled(context)
                                 kotlinx.coroutines.delay(1000L)
                             }
                         }
@@ -4690,6 +4773,29 @@ private fun WakeWordAndVoiceprintDialog(
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Text("🔋 一鍵允許「不限制電池用量」", color = CyanAccent)
+                            }
+                        }
+
+                        Text(
+                            if (notifAccessGranted) "✅ 已授權「通知讀取權限」：可隨時問 Luna『剛剛 LINE 有誰傳訊息給我？』"
+                            else "📬 若想讓 Luna 幫您免手朗讀 LINE / 簡訊最新通知，可開啟通知讀取權限：",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (notifAccessGranted) Color(0xFFA7F3D0) else Color(0xFFCBD5E1)
+                        )
+                        if (!notifAccessGranted) {
+                            OutlinedButton(
+                                onClick = {
+                                    runCatching {
+                                        context.startActivity(
+                                            android.content.Intent(
+                                                android.provider.Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS
+                                            ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        )
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("🔔 一鍵前往開啟「通知讀取權限」", color = CyanAccent)
                             }
                         }
                     }

@@ -1480,6 +1480,20 @@ class LiveSessionManager(
                 "[教學輔助指令] 使用者沒聽清楚剛才那句話。請把你剛才說的那句【$langLabel】用非常慢、字正腔圓的語速再重複唸一次，並用簡單的一句繁體中文解釋意思。"
             "give_hint" ->
                 "[教學輔助指令] 使用者目前不知道下一句該怎麼用【$langLabel】回答。請用溫和的繁體中文提供 1～2 個簡短好唸的【$langLabel】回答範例，並帶著使用者慢速唸一次！"
+            "audio_flashcard_quiz" -> {
+                val cards = activeNotebookEntries
+                    .filter { it.languageCode == activeSettings.tutorTargetLanguage }
+                    .ifEmpty { activeNotebookEntries }
+                    .take(8)
+                if (cards.isEmpty()) {
+                    "[隨身聽單字抽考模式] 使用者啟動了語音單字抽考，但目前單字本尚無收藏紀錄。請先用親切的繁體中文搭配【$langLabel】隨機出 3 道符合程度（${activeSettings.tutorLevel.shortLabel}）的實用生活短句聽力/口說抽考題，一題一題與使用者互動問答！"
+                } else {
+                    val cardsSummary = cards.mapIndexed { idx, c ->
+                        "${idx + 1}. 目標外語句：「${c.aiSentence.take(90)}」｜筆記重點：${c.coachNotes.replace("\n", " ").take(110)}"
+                    }.joinToString("\n")
+                    "[🎧 通勤隨身聽單字/句型語音抽考模式啟動]\n以下是使用者單字本中收藏的重點句型與糾錯筆記：\n$cardsSummary\n請扮演熱情的隨身語音抽考教練，一次抽考其中 1 題（例如說出中文意思請使用者用【$langLabel】說出來，或慢速唸出外語句請使用者回答意思並跟讀），等使用者回答後給予鼓勵與糾正，再進入下一題！"
+                }
+            }
             else -> return
         }
 

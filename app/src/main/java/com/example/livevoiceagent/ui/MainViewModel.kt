@@ -93,6 +93,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
         }
     )
 
+    private val floatingVoicePill = FloatingVoicePillManager(
+        context = application.applicationContext,
+        onToggleMute = { toggleMute() },
+        onHangupCall = { stopLiveCall() }
+    )
+
     private val _uiState = MutableStateFlow(UiState())
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
 
@@ -225,7 +231,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
                     oldSettings.openAiApiKey != newSettings.openAiApiKey ||
                     oldSettings.wakeWordPhrase != newSettings.wakeWordPhrase ||
                     oldSettings.wakeWordVoiceprintEnabled != newSettings.wakeWordVoiceprintEnabled ||
-                    oldSettings.wakeWordVoiceprintData != newSettings.wakeWordVoiceprintData
+                    oldSettings.wakeWordVoiceprintData != newSettings.wakeWordVoiceprintData ||
+                    oldSettings.wakeWordSmartContextOnly != newSettings.wakeWordSmartContextOnly ||
+                    oldSettings.wakeWordOfflineDtwEnabled != newSettings.wakeWordOfflineDtwEnabled
                 ) {
                     wakeWordManager.startStandby(newSettings)
                 }
@@ -233,6 +241,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
                 wakeWordManager.stopStandby()
             }
         }
+        val cur = _uiState.value
+        floatingVoicePill.updatePillState(
+            enabled = newSettings.floatingVoicePillEnabled,
+            connectionState = cur.connectionState,
+            isMuted = cur.isMuted,
+            micLevel = cur.micLevel
+        )
     }
 
     fun setWakeWordEnabled(enabled: Boolean) {
@@ -357,6 +372,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
         val newMuted = !_uiState.value.isMuted
         _uiState.update { it.copy(isMuted = newMuted) }
         liveSessionManager.setMuted(newMuted)
+        val cur = _uiState.value
+        floatingVoicePill.updatePillState(
+            enabled = cur.settings.floatingVoicePillEnabled,
+            connectionState = cur.connectionState,
+            isMuted = newMuted,
+            micLevel = cur.micLevel
+        )
     }
 
     fun toggleSpeakerphone() {
@@ -946,6 +968,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
         _uiState.update {
             it.copy(connectionState = state, statusBanner = statusText)
         }
+        val cur = _uiState.value
+        floatingVoicePill.updatePillState(
+            enabled = cur.settings.floatingVoicePillEnabled,
+            connectionState = state,
+            isMuted = cur.isMuted,
+            micLevel = cur.micLevel,
+            latestTranscriptSnippet = if (state == ConnectionState.CONNECTING) "正在連線至 Luna..." else null
+        )
         if (state == ConnectionState.DISCONNECTED) {
             triggerAiTitleGenerationIfNeeded()
             viewModelScope.launch {
@@ -1155,6 +1185,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
                 )
             )
         }
+        val cur = _uiState.value
+        val latestMsg = cur.currentSession.messages.lastOrNull {
+            it.role == MessageRole.USER || it.role == MessageRole.ASSISTANT_VOICE
+        }?.text?.takeIf { it.isNotBlank() }
+        floatingVoicePill.updatePillState(
+            enabled = cur.settings.floatingVoicePillEnabled,
+            connectionState = cur.connectionState,
+            isMuted = cur.isMuted,
+            micLevel = cur.micLevel,
+            latestTranscriptSnippet = latestMsg
+        )
         if (role != MessageRole.USER) {
             triggerAiTitleGenerationIfNeeded()
         }
@@ -1231,6 +1272,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
 
     override fun onMicLevelChanged(level: Float) {
         _uiState.update { it.copy(micLevel = level) }
+        val cur = _uiState.value
+        if (cur.connectionState != ConnectionState.DISCONNECTED) {
+            floatingVoicePill.updatePillState(
+                enabled = cur.settings.floatingVoicePillEnabled,
+                connectionState = cur.connectionState,
+                isMuted = cur.isMuted,
+                micLevel = level
+            )
+        }
     }
 
     override fun onVoiceUsageUpdated(seconds: Int) {
@@ -1244,6 +1294,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
     override fun onCleared() {
         super.onCleared()
         pendingAutoHangupJob?.cancel()
+        floatingVoicePill.hide()
         wakeWordManager.stopStandby()
         liveSessionManager.disconnectImmediate()
     }
