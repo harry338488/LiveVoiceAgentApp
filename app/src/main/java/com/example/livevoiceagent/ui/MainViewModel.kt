@@ -153,6 +153,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
             onAutoHangupRequested(reason = bannerMsg, delayMs = delayMs)
         }
 
+        // Keep in-memory settings 100% in sync when voice tools save aliases, parking, memory, or to-dos
+        locationMapsToolManager.onPlaceAliasesUpdated = { updated ->
+            _uiState.update { it.copy(settings = it.settings.copy(savedPlaceAliases = updated)) }
+        }
+        locationMapsToolManager.onParkedCarUpdated = { updated ->
+            _uiState.update { it.copy(settings = it.settings.copy(parkedCarInfoJson = updated)) }
+        }
+        locationMapsToolManager.onUserMemoryUpdated = { updated ->
+            _uiState.update {
+                it.copy(settings = it.settings.copy(userMemoryProfile = updated, longTermMemoryEnabled = true))
+            }
+        }
+        locationMapsToolManager.onTodoItemsUpdated = { updated ->
+            _uiState.update { it.copy(settings = it.settings.copy(todoItemsJson = updated)) }
+        }
+        wakeWordManager.onWhisperWakeCallTracked = {
+            _uiState.update { st ->
+                val updated = st.settings.copy(totalWakeWhisperCalls = st.settings.totalWakeWhisperCalls + 1)
+                repository.saveSettings(updated)
+                st.copy(settings = updated)
+            }
+        }
+
         viewModelScope.launch {
             val sessions = repository.loadAllSessions()
             val notebook = repository.loadNotebookEntries()
@@ -534,8 +557,64 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
         val state = _uiState.value
         if (!state.settings.longTermMemoryEnabled) return
         val userTurns = state.currentSession.messages.count { it.role == MessageRole.USER && it.text.length >= 4 }
-        if (userTurns >= 3) {
+        if (userTurns >= 2) {
             extractMemoryFromCurrentConversation(silent = true)
+        }
+    }
+
+    fun handleSharedTextFromExternalApp(sharedText: String) {
+        val clean = sharedText.trim()
+        if (clean.isBlank()) return
+        val prompt = "📲 [從其他 App 分享給 Luna]\n$clean\n\n請幫我整理重點或回答相關問題；若裡面包含地址或餐廳名稱，也可以幫我查詢或導航。"
+        val turnIdx = (_uiState.value.currentSession.messages.maxOfOrNull { it.turnIndex } ?: _uiState.value.currentSession.messages.size) + 1
+        _uiState.update { cur ->
+            val msgs = cur.currentSession.messages.toMutableList()
+            msgs.add(
+                ChatMessage(
+                    streamKey = "share_text_$turnIdx",
+                    turnIndex = turnIdx,
+                    role = MessageRole.USER,
+                    text = prompt,
+                    modelTag = "📲 跨 App 分享"
+                )
+            )
+            cur.copy(
+                statusBanner = "📲 已收到分享內容，Luna 正在分析中...",
+                currentSession = cur.currentSession.copy(
+                    updatedAt = System.currentTimeMillis(),
+                    messages = sortMessagesByTurn(msgs)
+                )
+            )
+        }
+        persistCurrentSession()
+        viewModelScope.launch(Dispatchers.IO) {
+            val res = backendLlmClient.runDelegatedTask(
+                settings = _uiState.value.settings,
+                conversationHistory = _uiState.value.currentSession.messages,
+                taskHint = prompt,
+                onThinkingStatusUpdate = {},
+                onSearchExecuted = { onSearchCardAdded(it, turnIdx) },
+                onCalendarActionLogged = { note ->
+                    onTranscriptDelta(MessageRole.SYSTEM, note, System.currentTimeMillis(), "Tools", "share_tool_$turnIdx", turnIdx)
+                }
+            )
+            res.onSuccess { brainResp ->
+                val answer = brainResp.detailedNotes.ifBlank { brainResp.spokenSummary }
+                onTranscriptDelta(
+                    role = MessageRole.ASSISTANT_VOICE,
+                    delta = answer,
+                    timelineMs = System.currentTimeMillis(),
+                    modelTag = "📲 Luna 分享解析 (${_uiState.value.settings.backendBrainModel})",
+                    streamKey = "share_reply_$turnIdx",
+                    turnIndex = turnIdx
+                )
+                if (_uiState.value.connectionState != ConnectionState.DISCONNECTED) {
+                    liveSessionManager.injectVisionResultIntoActiveVoiceSession("[分享內容解析結果] ${brainResp.spokenSummary.take(600)}")
+                }
+                _uiState.update { it.copy(statusBanner = "✅ 已完成跨 App 分享內容解析") }
+            }.onFailure { err ->
+                _uiState.update { it.copy(errorToast = "分享內容解析失敗: ${err.message}") }
+            }
         }
     }
 
@@ -1284,7 +1363,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
     }
 
     override fun onVoiceUsageUpdated(seconds: Int) {
-        _uiState.update { it.copy(voiceUsageSeconds = seconds) }
+        val prev = _uiState.value.voiceUsageSeconds
+        val delta = (seconds - prev).coerceAtLeast(0)
+        _uiState.update { st ->
+            val updatedSettings = if (delta > 0) {
+                val s = st.settings.copy(totalVoiceUsageSeconds = st.settings.totalVoiceUsageSeconds + delta)
+                repository.saveSettings(s)
+                s
+            } else {
+                st.settings
+            }
+            st.copy(voiceUsageSeconds = seconds, settings = updatedSettings)
+        }
     }
 
     override fun onError(message: String) {

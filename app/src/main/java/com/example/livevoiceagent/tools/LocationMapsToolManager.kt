@@ -67,6 +67,18 @@ class LocationMapsToolManager(
     var onRequestEndLiveSession: ((reason: String) -> Unit)? = null
 
     @Volatile
+    var onPlaceAliasesUpdated: ((String) -> Unit)? = null
+
+    @Volatile
+    var onParkedCarUpdated: ((String) -> Unit)? = null
+
+    @Volatile
+    var onUserMemoryUpdated: ((String) -> Unit)? = null
+
+    @Volatile
+    var onTodoItemsUpdated: ((String) -> Unit)? = null
+
+    @Volatile
     private var cachedGeocodeKey: String = ""
     @Volatile
     private var cachedAddressPair: Pair<String, String>? = null
@@ -224,6 +236,12 @@ class LocationMapsToolManager(
                 "set_alarm_or_timer" -> executeSetAlarmOrTimer(argsJson)
                 "make_phone_call" -> executeMakePhoneCall(argsJson)
                 "read_recent_notifications" -> executeReadRecentNotifications(argsJson)
+                "save_user_memory" -> executeSaveUserMemory(argsJson)
+                "manage_todo_list" -> executeManageTodoList(argsJson)
+                "get_morning_commute_briefing" -> executeMorningCommuteBriefing(
+                    linkupApiKey = linkupApiKey,
+                    googleMapsApiKey = googleMapsApiKey
+                )
                 "end_live_voice_session" -> executeEndLiveVoiceSession(argsJson)
                 else -> LocationToolExecutionResult(
                     toolOutputJson = JSONObject().put("status", "error")
@@ -1036,6 +1054,7 @@ class LocationMapsToolManager(
         existingLines.add("$alias=$address")
         val updated = existingLines.joinToString("\n")
         prefs.edit().putString("savedPlaceAliases", updated).apply()
+        onPlaceAliasesUpdated?.invoke(updated)
 
         val out = JSONObject().apply {
             put("status", "success")
@@ -1061,7 +1080,9 @@ class LocationMapsToolManager(
             put("note", note)
             put("saved_at", timeStr)
         }
-        prefs.edit().putString("parkedCarInfoJson", json.toString()).apply()
+        val jsonStr = json.toString()
+        prefs.edit().putString("parkedCarInfoJson", jsonStr).apply()
+        onParkedCarUpdated?.invoke(jsonStr)
 
         val out = JSONObject().apply {
             put("status", "success")
@@ -1310,6 +1331,184 @@ class LocationMapsToolManager(
         )
     }
 
+    private fun executeSaveUserMemory(argsJson: JSONObject): LocationToolExecutionResult {
+        val fact = argsJson.optString("memory_fact", "").trim()
+        if (fact.isBlank()) {
+            return LocationToolExecutionResult(
+                toolOutputJson = JSONObject().put("status", "error").put("message", "請提供要記住的內容 (memory_fact)").toString(),
+                actionLogText = "⚠️ 長期記憶寫入失敗：內容空白"
+            )
+        }
+        val prefs = context.getSharedPreferences("live_voice_agent_prefs", Context.MODE_PRIVATE)
+        val existing = prefs.getString("userMemoryProfile", "").orEmpty().trim()
+        val bullet = if (fact.startsWith("•")) fact else "• $fact"
+        val updated = if (existing.isBlank()) bullet else "$existing\n$bullet"
+        prefs.edit().putString("userMemoryProfile", updated).putBoolean("longTermMemoryEnabled", true).apply()
+        onUserMemoryUpdated?.invoke(updated)
+
+        val out = JSONObject().apply {
+            put("status", "success")
+            put("saved_fact", bullet)
+            put("message", "已即時寫入使用者的跨對話長期記憶庫：「$fact」。請簡短回覆使用者『好的，我已經記住了！』")
+        }.toString()
+        return LocationToolExecutionResult(
+            toolOutputJson = out,
+            actionLogText = "🧠 已即時寫入長期記憶：$bullet"
+        )
+    }
+
+    private fun executeManageTodoList(argsJson: JSONObject): LocationToolExecutionResult {
+        val action = argsJson.optString("action", "list").lowercase(Locale.ROOT).trim()
+        val itemText = argsJson.optString("item", "").trim()
+        val prefs = context.getSharedPreferences("live_voice_agent_prefs", Context.MODE_PRIVATE)
+        val raw = prefs.getString("todoItemsJson", "").orEmpty()
+        val arr = runCatching { if (raw.isBlank()) JSONArray() else JSONArray(raw) }.getOrDefault(JSONArray())
+        val items = mutableListOf<JSONObject>()
+        for (i in 0 until arr.length()) {
+            arr.optJSONObject(i)?.let { items.add(it) }
+        }
+
+        val logText: String
+        val msg: String
+        when (action) {
+            "add" -> {
+                if (itemText.isBlank()) {
+                    return LocationToolExecutionResult(
+                        toolOutputJson = JSONObject().put("status", "error").put("message", "請提供待辦事項內容").toString(),
+                        actionLogText = "⚠️ 新增待辦失敗：缺少內容"
+                    )
+                }
+                val timeStr = java.text.SimpleDateFormat("MM/dd HH:mm", Locale.getDefault()).format(java.util.Date())
+                items.add(0, JSONObject().apply {
+                    put("id", java.util.UUID.randomUUID().toString().take(8))
+                    put("text", itemText)
+                    put("done", false)
+                    put("createdAt", timeStr)
+                })
+                val outArr = JSONArray().apply { items.forEach { put(it) } }.toString()
+                prefs.edit().putString("todoItemsJson", outArr).apply()
+                onTodoItemsUpdated?.invoke(outArr)
+                logText = "📝 已新增待辦事項：$itemText"
+                msg = "已將「$itemText」加入您的待辦清單！"
+            }
+            "complete", "done" -> {
+                val target = items.firstOrNull { !it.optBoolean("done", false) && it.optString("text", "").contains(itemText, ignoreCase = true) }
+                if (target != null) {
+                    target.put("done", true)
+                    val outArr = JSONArray().apply { items.forEach { put(it) } }.toString()
+                    prefs.edit().putString("todoItemsJson", outArr).apply()
+                    onTodoItemsUpdated?.invoke(outArr)
+                    logText = "✅ 已標記完成：${target.optString("text")}"
+                    msg = "已將「${target.optString("text")}」標記為已完成！"
+                } else {
+                    logText = "📝 找不到未完成的待辦：$itemText"
+                    msg = "在未完成清單中找不到與「$itemText」相符的待辦事項。"
+                }
+            }
+            "delete", "remove" -> {
+                val removed = items.removeAll { it.optString("text", "").contains(itemText, ignoreCase = true) }
+                val outArr = JSONArray().apply { items.forEach { put(it) } }.toString()
+                prefs.edit().putString("todoItemsJson", outArr).apply()
+                onTodoItemsUpdated?.invoke(outArr)
+                logText = if (removed) "🗑️ 已刪除待辦：$itemText" else "📝 找不到可刪除的待辦：$itemText"
+                msg = if (removed) "已從待辦清單刪除「$itemText」。" else "找不到與「$itemText」相符的待辦事項。"
+            }
+            else -> {
+                val pending = items.filter { !it.optBoolean("done", false) }
+                logText = "📝 查詢待辦清單（共 ${pending.size} 項未完成）"
+                msg = if (pending.isEmpty()) {
+                    "您目前沒有任何未完成的待辦事項！"
+                } else {
+                    "您目前有 ${pending.size} 項未完成待辦：\n" +
+                            pending.mapIndexed { idx, it -> "${idx + 1}. ${it.optString("text")}（${it.optString("createdAt")}）" }.joinToString("\n")
+                }
+            }
+        }
+
+        val out = JSONObject().apply {
+            put("status", "success")
+            put("action", action)
+            put("message", msg)
+        }.toString()
+        return LocationToolExecutionResult(toolOutputJson = out, actionLogText = logText)
+    }
+
+    private suspend fun executeMorningCommuteBriefing(
+        linkupApiKey: String,
+        googleMapsApiKey: String
+    ): LocationToolExecutionResult {
+        val snap = getCurrentLocationSnapshot(allowBlockingGeocode = true)
+        val city = snap?.cityOrDistrict?.ifBlank { "台灣" } ?: "台灣"
+        val prefs = context.getSharedPreferences("live_voice_agent_prefs", Context.MODE_PRIVATE)
+
+        // 1. Weather via Linkup if available
+        val weatherSummary = if (linkupApiKey.isNotBlank()) {
+            linkupClient.search(
+                apiKey = linkupApiKey,
+                query = "$city 今天天氣 氣溫 降雨機率",
+                depth = "standard"
+            ).getOrNull()?.answer?.take(220) ?: "暫無即時天氣資料"
+        } else {
+            "未設定 Linkup API Key，略過天氣查詢"
+        }
+
+        // 2. Commute ETA to saved "公司" if available
+        val companyAddr = resolvePlaceAlias("公司")
+        val commuteSummary = if (companyAddr != "公司" && snap != null && googleMapsApiKey.isNotBlank()) {
+            val dest = resolveNavigationDestination(companyAddr, googleMapsApiKey, preferNearestHint = false)
+            if (dest != null) {
+                queryGoogleRoutesTrafficEta(
+                    apiKey = googleMapsApiKey.trim(),
+                    originLat = snap.latitude,
+                    originLon = snap.longitude,
+                    destLat = dest.latitude,
+                    destLon = dest.longitude,
+                    travelMode = "driving"
+                )?.let { "前往公司（$companyAddr）目前路況：$it" } ?: "已設定公司地址：$companyAddr"
+            } else {
+                "已設定公司地址：$companyAddr"
+            }
+        } else {
+            "尚未設定『公司』常用地點（可對我說『記住我公司在…』）"
+        }
+
+        // 3. Pending To-Dos
+        val rawTodos = prefs.getString("todoItemsJson", "").orEmpty()
+        val pendingTodos = mutableListOf<String>()
+        runCatching {
+            if (rawTodos.isNotBlank()) {
+                val arr = JSONArray(rawTodos)
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    if (!o.optBoolean("done", false)) pendingTodos.add(o.optString("text", ""))
+                }
+            }
+        }
+
+        // 4. Recent notifications
+        val notifSummary = LunaNotificationListenerService.formatRecentNotificationsForLlm(context, "")
+
+        val briefing = buildString {
+            appendLine("☀️ 【早安 / 出門智慧簡報】")
+            appendLine("📍 目前所在：$city")
+            appendLine("🌤️ 今日天氣：$weatherSummary")
+            appendLine("🚗 通勤路況：$commuteSummary")
+            appendLine("📝 未完成待辦（${pendingTodos.size} 項）：${if (pendingTodos.isEmpty()) "無" else pendingTodos.take(5).joinToString("、")}")
+            appendLine("📬 最新通知摘要：${notifSummary.take(260)}")
+        }.trim()
+
+        val out = JSONObject().apply {
+            put("status", "success")
+            put("briefing", briefing)
+            put("message", "請用親切有精神的口語，在 25～35 秒內把以上天氣、通勤路況、待辦事項與重要通知重點播報給使用者！（若使用者有開啟行事曆權限，也可一併搭配今天的行事曆行程）")
+        }.toString()
+
+        return LocationToolExecutionResult(
+            toolOutputJson = out,
+            actionLogText = briefing
+        )
+    }
+
     companion object {
         const val NAVIGATION_RULES =
             "【導航規則】①只要使用者表達想前往某地（導航到/帶我去/我要去/去…怎麼走/開車騎車走路去…），一律立即呼叫 open_google_maps_navigation 直接跳轉，不需要使用者說「跳轉」，也不要先反問。" +
@@ -1336,10 +1535,10 @@ class LocationMapsToolManager(
         data class VoiceNavIntent(val destination: String, val travelMode: String)
 
         private val NAV_PATTERNS = listOf(
-            Regex("(?:幫我|請|麻煩|給我)?(?:開(?:啟)?|啟動|開始)?導航(?:一下)?(?:到|去|至|前往|往)?(.+)"),
-            Regex("(?:幫我|請|麻煩)?帶我(?:去|到|前往)(.+)"),
-            Regex("(?:我要|我想|想要|幫我)?(?:開車|騎車|騎機車|走路|步行|騎腳踏車|騎單車)(?:去|到|前往)(.+)"),
-            Regex("(?:我要|我想|想要)?(?:去|到)(.+?)(?:要)?怎麼走"),
+            Regex("(?:幫我|請|麻煩|給我)?(?:開(?:啟)?|啟動|開始)?導航(?:一下)?(?:到|去|回|至|前往|往)?(.+)"),
+            Regex("(?:幫我|請|麻煩)?帶我(?:去|到|回|前往)(.+)"),
+            Regex("(?:我要|我想|想要|幫我)?(?:開車|騎車|騎機車|走路|步行|騎腳踏車|騎單車)(?:去|到|回|前往)(.+)"),
+            Regex("(?:我要|我想|想要)?(?:去|到|回)(.+?)(?:要)?怎麼走"),
             Regex("(?:我要|我想|想要)?前往(.+)")
         )
 
@@ -1386,6 +1585,9 @@ class LocationMapsToolManager(
             "set_alarm_or_timer",
             "make_phone_call",
             "read_recent_notifications",
+            "save_user_memory",
+            "manage_todo_list",
+            "get_morning_commute_briefing",
             "end_live_voice_session"
         )
 
@@ -1605,6 +1807,59 @@ class LocationMapsToolManager(
                                 put("description", "（選填）篩選特定 App 名稱，如『LINE』、『Gmail』、『訊息』；若留空則讀取所有最新通知")
                             })
                         })
+                    })
+                },
+                JSONObject().apply {
+                    put("type", "function")
+                    put("name", "save_user_memory")
+                    put(
+                        "description",
+                        "當使用者說『記住我…』、『幫我記起來…』或透露重要的個人喜好、稱呼、習慣、學習目標時，立刻呼叫此工具將事實寫入跨對話長期記憶庫。"
+                    )
+                    put("parameters", JSONObject().apply {
+                        put("type", "object")
+                        put("properties", JSONObject().apply {
+                            put("memory_fact", JSONObject().apply {
+                                put("type", "string")
+                                put("description", "精簡的一句繁體中文個人記憶事實，例如：『喜歡喝無糖綠茶、不吃香菜』、『養了一隻橘貓叫阿橘』")
+                            })
+                        })
+                        put("required", JSONArray().put("memory_fact"))
+                    })
+                },
+                JSONObject().apply {
+                    put("type", "function")
+                    put("name", "manage_todo_list")
+                    put(
+                        "description",
+                        "管理使用者的獨立語音速記與待辦清單（To-Do）。當使用者說『幫我記一下要買牛奶』、『我還有哪些待辦沒做？』、『把買牛奶標記完成』時呼叫。"
+                    )
+                    put("parameters", JSONObject().apply {
+                        put("type", "object")
+                        put("properties", JSONObject().apply {
+                            put("action", JSONObject().apply {
+                                put("type", "string")
+                                put("enum", JSONArray().put("add").put("list").put("complete").put("delete"))
+                                put("description", "操作類型：add (新增)、list (查詢未完成)、complete (標記完成)、delete (刪除)")
+                            })
+                            put("item", JSONObject().apply {
+                                put("type", "string")
+                                put("description", "待辦事項內容或關鍵字（list 時可留空）")
+                            })
+                        })
+                        put("required", JSONArray().put("action"))
+                    })
+                },
+                JSONObject().apply {
+                    put("type", "function")
+                    put("name", "get_morning_commute_briefing")
+                    put(
+                        "description",
+                        "當使用者說『早安』、『我要出門了』、『幫我播報今天的簡報』時呼叫，一次彙整今日所在地天氣、前往公司的即時路況車程、未完成待辦事項與最新未讀通知！"
+                    )
+                    put("parameters", JSONObject().apply {
+                        put("type", "object")
+                        put("properties", JSONObject())
                     })
                 }
             )

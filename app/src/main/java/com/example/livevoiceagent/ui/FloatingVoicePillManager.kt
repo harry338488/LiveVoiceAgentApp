@@ -46,6 +46,8 @@ class FloatingVoicePillManager(
     private var lastState: ConnectionState = ConnectionState.DISCONNECTED
     private var lastMuted: Boolean = false
     private var lastSubtitle: String = "請直接開口說話..."
+    @Volatile
+    private var lastUiPostMs: Long = 0L
 
     private fun dp(value: Int): Int {
         return TypedValue.applyDimension(
@@ -70,6 +72,11 @@ class FloatingVoicePillManager(
         micLevel: Float,
         latestTranscriptSnippet: String? = null
     ) {
+        val stateChanged = connectionState != lastState || isMuted != lastMuted || !latestTranscriptSnippet.isNullOrBlank()
+        val now = System.currentTimeMillis()
+        if (!stateChanged && now - lastUiPostMs < 150L) return
+        lastUiPostMs = now
+
         mainHandler.post {
             lastState = connectionState
             lastMuted = isMuted

@@ -124,6 +124,9 @@ class MainActivity : ComponentActivity() {
                                 needed.add(Manifest.permission.ACCESS_FINE_LOCATION)
                                 needed.add(Manifest.permission.ACCESS_COARSE_LOCATION)
                             }
+                            if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) {
+                                needed.add(Manifest.permission.READ_CONTACTS)
+                            }
                         }
 
                         if (needed.isEmpty()) {
@@ -151,6 +154,39 @@ class MainActivity : ComponentActivity() {
      */
     private fun handleVoiceAssistantIntentIfNeeded(intent: Intent?, isColdStart: Boolean) {
         val action = intent?.action ?: return
+
+        // Handle Android "Share -> Live Voice Brain" (image/* or text/plain)
+        if (action == Intent.ACTION_SEND) {
+            val mimeType = intent.type.orEmpty()
+            if (mimeType.startsWith("image/")) {
+                val imgUri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableExtra(Intent.EXTRA_STREAM)
+                }
+                val caption = intent.getStringExtra(Intent.EXTRA_TEXT).orEmpty()
+                if (imgUri != null) {
+                    runCatching {
+                        contentResolver.openInputStream(imgUri)?.use { input ->
+                            android.graphics.BitmapFactory.decodeStream(input)
+                        }?.let { bmp ->
+                            mainViewModel.sendImageMessage(bmp, caption)
+                            Toast.makeText(this, "📲 已收到分享圖片，Luna 正在為您解析！", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+                return
+            } else if (mimeType == "text/plain") {
+                val sharedText = intent.getStringExtra(Intent.EXTRA_TEXT).orEmpty()
+                if (sharedText.isNotBlank()) {
+                    mainViewModel.handleSharedTextFromExternalApp(sharedText)
+                    Toast.makeText(this, "📲 已收到分享內容，Luna 正在整理重點！", Toast.LENGTH_SHORT).show()
+                }
+                return
+            }
+        }
+
         val isAssistAction = action == Intent.ACTION_ASSIST || action == Intent.ACTION_VOICE_COMMAND
         val isTalkShortcut = action == ACTION_START_VOICE_CHAT ||
                 (action == Intent.ACTION_VIEW && intent.data?.scheme == "livevoiceagent")

@@ -138,7 +138,9 @@ class WakeWordManager(
     @Volatile
     private var smartContextOnly: Boolean = false
     @Volatile
-    private var offlineDtwEnabled: Boolean = true
+    private var offlineDtwEnabled: Boolean = false
+    @Volatile
+    var onWhisperWakeCallTracked: (() -> Unit)? = null
 
     private var lastTriggerWallMs: Long = 0L
 
@@ -630,14 +632,16 @@ class WakeWordManager(
                 return false
             }
 
-            // ⚡ 100% On-Device Offline DTW + Voiceprint Instant Wake-Up (0 API cost, ~0.25s latency!)
+            // ⚡ 100% On-Device Offline Multi-Band DTW + Voiceprint Instant Wake-Up (opt-in, requires >=2 samples)
             val dtwSim = computeDtwEnvelopeSimilarity(profile.temporalEnvelope, candidateProfile.temporalEnvelope)
             val durationSec = pcmSamples.size.toFloat() / sampleRate.coerceAtLeast(1)
             if (offlineDtwEnabled &&
-                profile.temporalEnvelope.isNotEmpty() &&
-                similarityScore >= 81 &&
-                dtwSim >= 0.77f &&
-                durationSec in 1.05f..3.15f
+                profile.sampleCount >= 2 &&
+                profile.temporalEnvelope.size == 48 &&
+                candidateProfile.temporalEnvelope.size == 48 &&
+                similarityScore >= 84 &&
+                dtwSim >= 0.84f &&
+                durationSec in 1.15f..3.15f
             ) {
                 lastTriggerWallMs = System.currentTimeMillis()
                 isPausedForActiveCall = true
@@ -659,6 +663,7 @@ class WakeWordManager(
         }
 
         notifyStatusOnMain(true, "🎙️ 偵測到人聲，正在辨識是否為「$targetWakePhrase」...")
+        onWhisperWakeCallTracked?.invoke()
 
         // Step 2: Fast bilingual transcription WITHOUT wake-phrase prompt (eliminates Whisper prompt hallucination on noise!)
         val transcript = transcribeWakeCandidateWithOpenAi(
@@ -976,25 +981,64 @@ class WakeWordManager(
         val norm = sqrt(normSq.coerceAtLeast(1e-6f))
         val normalizedBands = FloatArray(8) { i -> bandAccum[i] / norm }
 
-        // Extract 12-segment temporal syllable envelope across the active utterance for DTW matching
-        val bins = 12
-        val temporalEnv = FloatArray(bins)
-        val segLen = (length / bins).coerceAtLeast(1)
-        var maxSegRms = 1e-4f
-        for (b in 0 until bins) {
-            val sIdx = b * segLen
-            val eIdx = minOf(length, sIdx + segLen)
+        // Trim leading & trailing silence before extracting a 12-segment x 4-band spectral trajectory (48 features)
+        val trimStep = 256
+        var activeStart = 0
+        var activeEnd = length
+        while (activeStart + trimStep < length) {
             var sq = 0.0
-            for (i in sIdx until eIdx) {
+            for (i in activeStart until activeStart + trimStep) {
                 val v = samples[i].toDouble() / 32768.0
                 sq += v * v
             }
-            val r = sqrt(sq / (eIdx - sIdx).coerceAtLeast(1)).toFloat()
-            temporalEnv[b] = r
-            if (r > maxSegRms) maxSegRms = r
+            if (sqrt(sq / trimStep) > 0.022) break
+            activeStart += trimStep
         }
+        while (activeEnd - trimStep > activeStart) {
+            var sq = 0.0
+            for (i in (activeEnd - trimStep) until activeEnd) {
+                val v = samples[i].toDouble() / 32768.0
+                sq += v * v
+            }
+            if (sqrt(sq / trimStep) > 0.022) break
+            activeEnd -= trimStep
+        }
+        if (activeEnd - activeStart < sampleRate / 3) {
+            activeStart = 0
+            activeEnd = length
+        }
+
+        val bins = 12
+        val dtwFreqs = floatArrayOf(380f, 920f, 1850f, 3200f)
+        val temporalEnv = FloatArray(bins * dtwFreqs.size)
+        val activeLen = (activeEnd - activeStart).coerceAtLeast(bins)
+        val segLen = (activeLen / bins).coerceAtLeast(1)
         for (b in 0 until bins) {
-            temporalEnv[b] = (temporalEnv[b] / maxSegRms).coerceIn(0f, 1f)
+            val sIdx = activeStart + b * segLen
+            val eIdx = minOf(activeEnd, sIdx + segLen)
+            val bandVals = FloatArray(dtwFreqs.size)
+            var segNormSq = 0f
+            for (fIdx in dtwFreqs.indices) {
+                val omega = (2.0 * PI * dtwFreqs[fIdx]) / sampleRate
+                val coeff = 2.0 * cos(omega)
+                var q1 = 0.0
+                var q2 = 0.0
+                var i = sIdx
+                while (i < eIdx) {
+                    val x = samples[i].toDouble() / 32768.0
+                    val q0 = coeff * q1 - q2 + x
+                    q2 = q1
+                    q1 = q0
+                    i += 2
+                }
+                val p = sqrt((q1 * q1 + q2 * q2 - q1 * q2 * coeff).coerceAtLeast(1e-9)).toFloat()
+                bandVals[fIdx] = p
+                segNormSq += p * p
+            }
+            val segNorm = sqrt(segNormSq.coerceAtLeast(1e-6f))
+            for (fIdx in dtwFreqs.indices) {
+                temporalEnv[b * dtwFreqs.size + fIdx] = bandVals[fIdx] / segNorm
+            }
         }
 
         return VoiceprintProfile(
@@ -1008,22 +1052,27 @@ class WakeWordManager(
     }
 
     private fun computeDtwEnvelopeSimilarity(a: FloatArray, b: FloatArray): Float {
-        if (a.size < 6 || b.size < 6) return 0f
-        val n = a.size
-        val m = b.size
-        val dp = Array(n + 1) { FloatArray(m + 1) { 999f } }
+        if (a.size != 48 || b.size != 48) return 0f
+        val n = 12
+        val dims = 4
+        val dp = Array(n + 1) { FloatArray(n + 1) { 999f } }
         dp[0][0] = 0f
         for (i in 1..n) {
-            for (j in 1..m) {
-                if (abs(i - j) <= 3) {
-                    val cost = abs(a[i - 1] - b[j - 1])
+            for (j in 1..n) {
+                if (abs(i - j) <= 2) {
+                    var distSq = 0f
+                    for (d in 0 until dims) {
+                        val diff = a[(i - 1) * dims + d] - b[(j - 1) * dims + d]
+                        distSq += diff * diff
+                    }
+                    val cost = sqrt(distSq)
                     val prev = minOf(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1])
                     dp[i][j] = cost + prev
                 }
             }
         }
-        val avgDist = dp[n][m] / ((n + m) * 0.5f)
-        return (1f - avgDist * 1.6f).coerceIn(0f, 1f)
+        val avgDist = dp[n][n] / n.toFloat()
+        return (1f - avgDist * 1.15f).coerceIn(0f, 1f)
     }
 
     private fun computeVoiceprintSimilarityScore(

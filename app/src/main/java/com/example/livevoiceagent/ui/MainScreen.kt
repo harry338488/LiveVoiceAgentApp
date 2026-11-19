@@ -3811,6 +3811,168 @@ private fun SettingsAndModelFetchTab(
             }
         }
 
+        // 0b. Saved Place Aliases & Parked Car Card + Voice To-Do Checklist + API Cost Estimator
+        Surface(
+            shape = RoundedCornerShape(18.dp),
+            color = AssistantCardBg,
+            border = BorderStroke(1.dp, CyanAccent.copy(alpha = 0.28f)),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = "🏠 常用地點別名、🅿️ 停車記憶與 📝 待辦清單",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = CyanAccent
+                )
+                var aliasEditText by remember(s.savedPlaceAliases) { mutableStateOf(s.savedPlaceAliases) }
+                OutlinedTextField(
+                    value = aliasEditText,
+                    onValueChange = {
+                        aliasEditText = it
+                        onUpdateSettings(s.copy(savedPlaceAliases = it))
+                    },
+                    label = { Text("🏠 常用地點（每行一筆，如：家=台北市北投區...）") },
+                    placeholder = { Text("家=台北市北投區...\n公司=台北市信義區...") },
+                    minLines = 2,
+                    maxLines = 4,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                val parkedObj = remember(s.parkedCarInfoJson) {
+                    runCatching {
+                        if (s.parkedCarInfoJson.isBlank()) null else org.json.JSONObject(s.parkedCarInfoJson)
+                    }.getOrNull()
+                }
+                if (parkedObj != null) {
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = Color(0xFF090E1A).copy(alpha = 0.7f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Text(
+                                text = "🅿️ 上次停車位置（${parkedObj.optString("saved_at", "")}）",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFA7F3D0)
+                            )
+                            Text(
+                                text = "${parkedObj.optString("address", "")} · 備註：${parkedObj.optString("note", "無")}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color(0xFFE2E8F0)
+                            )
+                        }
+                    }
+                }
+
+                // Voice To-Do List Preview & One-Tap Toggle
+                val todoList = remember(s.todoItemsJson) {
+                    runCatching {
+                        val list = mutableListOf<org.json.JSONObject>()
+                        if (s.todoItemsJson.isNotBlank()) {
+                            val arr = org.json.JSONArray(s.todoItemsJson)
+                            for (i in 0 until arr.length()) {
+                                arr.optJSONObject(i)?.let { list.add(it) }
+                            }
+                        }
+                        list
+                    }.getOrDefault(emptyList())
+                }
+                if (todoList.isNotEmpty()) {
+                    Text(
+                        text = "📝 語音待辦清單（點擊可標記完成）",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFFFDE68A)
+                    )
+                    todoList.take(8).forEachIndexed { idx, item ->
+                        val isDone = item.optBoolean("done", false)
+                        val textVal = item.optString("text", "")
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    val updatedArr = org.json.JSONArray()
+                                    todoList.forEachIndexed { i, obj ->
+                                        val copyObj = org.json.JSONObject(obj.toString())
+                                        if (i == idx) copyObj.put("done", !isDone)
+                                        updatedArr.put(copyObj)
+                                    }
+                                    onUpdateSettings(s.copy(todoItemsJson = updatedArr.toString()))
+                                }
+                                .padding(vertical = 3.dp)
+                        ) {
+                            Text(
+                                text = if (isDone) "✅" else "⬜",
+                                modifier = Modifier.padding(end = 8.dp)
+                            )
+                            Text(
+                                text = textVal,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (isDone) Color(0xFF64748B) else Color(0xFFF1F5F9),
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // 0c. API Usage & Cost Estimator Dashboard
+        Surface(
+            shape = RoundedCornerShape(18.dp),
+            color = AssistantCardBg,
+            border = BorderStroke(1.dp, EmeraldAccent.copy(alpha = 0.28f)),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                val totalMin = s.totalVoiceUsageSeconds / 60.0
+                val estVoiceUsd = totalMin * 0.06
+                val estWakeUsd = s.totalWakeWhisperCalls * 0.0001
+                val totalUsd = estVoiceUsd + estWakeUsd
+                val totalTwd = totalUsd * 32.0
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "📊 API 使用量與預估花費儀表板",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = EmeraldAccent
+                        )
+                        Text(
+                            text = "累計 Live 語音：${String.format(java.util.Locale.US, "%.1f", totalMin)} 分鐘 · Whisper 喚醒驗證：${s.totalWakeWhisperCalls} 次",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFFCBD5E1)
+                        )
+                        Text(
+                            text = "預估累計花費：約 \$${String.format(java.util.Locale.US, "%.3f", totalUsd)} 美元（約台幣 ${String.format(java.util.Locale.US, "%.1f", totalTwd)} 元）",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFFA7F3D0)
+                        )
+                    }
+                    TextButton(
+                        onClick = {
+                            onUpdateSettings(s.copy(totalVoiceUsageSeconds = 0L, totalWakeWhisperCalls = 0))
+                        }
+                    ) {
+                        Text("歸零", color = Color(0xFF94A3B8), style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+            }
+        }
+
         // 1. API Keys Card
         Surface(
             shape = RoundedCornerShape(18.dp),

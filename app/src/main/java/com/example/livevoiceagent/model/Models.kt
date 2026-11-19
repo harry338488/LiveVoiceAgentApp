@@ -333,11 +333,16 @@ data class AppSettings(
     /** Only keep wake-word mic standby active while charging or connected to Bluetooth audio (frees Hey Google otherwise). */
     val wakeWordSmartContextOnly: Boolean = false,
     /** Enables 100% on-device DTW + voiceprint instant wake-up when acoustic template strongly matches enrolled profile. */
-    val wakeWordOfflineDtwEnabled: Boolean = true,
+    val wakeWordOfflineDtwEnabled: Boolean = false,
     /** Saved place aliases (one per line, e.g. "家=台北市北投區..." or "公司=..."). */
     val savedPlaceAliases: String = "",
     /** JSON storing the user's last parked car location, floor/pillar note, and timestamp. */
     val parkedCarInfoJson: String = "",
+    /** JSON array storing voice-managed To-Do / quick memo items. */
+    val todoItemsJson: String = "",
+    /** Cumulative live voice seconds & wake-word STT calls for the built-in cost estimator dashboard. */
+    val totalVoiceUsageSeconds: Long = 0L,
+    val totalWakeWhisperCalls: Int = 0,
     val translationTargetLanguage: String = "zh",
     val translationSecondaryLanguage: String = "ja",
     val customGlossaryTerms: String = "",

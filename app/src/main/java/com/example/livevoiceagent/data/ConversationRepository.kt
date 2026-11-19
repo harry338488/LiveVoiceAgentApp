@@ -71,9 +71,12 @@ class ConversationRepository(private val context: Context) {
             autoStartCallOnAppLaunch = prefs.getBoolean("autoStartCallOnAppLaunch", false),
             floatingVoicePillEnabled = prefs.getBoolean("floatingVoicePillEnabled", true),
             wakeWordSmartContextOnly = prefs.getBoolean("wakeWordSmartContextOnly", false),
-            wakeWordOfflineDtwEnabled = prefs.getBoolean("wakeWordOfflineDtwEnabled", true),
+            wakeWordOfflineDtwEnabled = prefs.getBoolean("wakeWordOfflineDtwEnabled", false),
             savedPlaceAliases = prefs.getString("savedPlaceAliases", "") ?: "",
             parkedCarInfoJson = prefs.getString("parkedCarInfoJson", "") ?: "",
+            todoItemsJson = prefs.getString("todoItemsJson", "") ?: "",
+            totalVoiceUsageSeconds = prefs.getLong("totalVoiceUsageSeconds", 0L),
+            totalWakeWhisperCalls = prefs.getInt("totalWakeWhisperCalls", 0),
             translationTargetLanguage = prefs.getString("translationTargetLanguage", "zh") ?: "zh",
             translationSecondaryLanguage = prefs.getString("translationSecondaryLanguage", "ja") ?: "ja",
             customGlossaryTerms = prefs.getString("customGlossaryTerms", "") ?: "",
@@ -134,6 +137,9 @@ class ConversationRepository(private val context: Context) {
             putBoolean("wakeWordOfflineDtwEnabled", settings.wakeWordOfflineDtwEnabled)
             putString("savedPlaceAliases", settings.savedPlaceAliases)
             putString("parkedCarInfoJson", settings.parkedCarInfoJson)
+            putString("todoItemsJson", settings.todoItemsJson)
+            putLong("totalVoiceUsageSeconds", settings.totalVoiceUsageSeconds)
+            putInt("totalWakeWhisperCalls", settings.totalWakeWhisperCalls)
             putString("translationTargetLanguage", settings.translationTargetLanguage.trim())
             putString("translationSecondaryLanguage", settings.translationSecondaryLanguage.trim())
             putString("customGlossaryTerms", settings.customGlossaryTerms)
