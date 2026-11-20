@@ -61,6 +61,7 @@ data class UiState(
     val isMeetingRecording: Boolean = false,
     val meetingRecordingSeconds: Int = 0,
     val isTranscribingMeeting: Boolean = false,
+    val meetingProgressMessage: String = "",
     val errorToast: String? = null
 )
 
@@ -430,31 +431,156 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
                 it.copy(
                     isMeetingRecording = false,
                     isTranscribingMeeting = recordedFile != null,
-                    statusBanner = if (recordedFile != null) "📝 正在透過 gpt-transcribe 轉寫 ${durSec} 秒錄音並生成重點摘要..." else "錄音過短已取消"
+                    meetingProgressMessage = if (recordedFile != null) "正在準備音檔並分段轉寫..." else "",
+                    statusBanner = if (recordedFile != null) "📝 正在透過 gpt-transcribe 轉寫 ${durSec} 秒錄音..." else "錄音過短已取消"
                 )
             }
-            if (recordedFile == null) return
+            if (recordedFile != null) {
+                processRecordedOrImportedAudioFile(
+                    audioFile = recordedFile,
+                    sourceLabel = "會議／課程錄音",
+                    fallbackDurationSec = durSec,
+                    deleteSourceAfter = true
+                )
+            }
+        }
+    }
 
-            viewModelScope.launch(Dispatchers.IO) {
+    fun importAndTranscribeAudioUri(uri: android.net.Uri) {
+        if (_uiState.value.isTranscribingMeeting) {
+            _uiState.update { it.copy(errorToast = "目前正在轉寫音檔中，請稍候完成再匯入下一個") }
+            return
+        }
+        val appCtx = getApplication<Application>().applicationContext
+        _uiState.update {
+            it.copy(
+                isTranscribingMeeting = true,
+                meetingProgressMessage = "正在複製並解析匯入的錄音檔...",
+                statusBanner = "📂 正在讀取匯入的錄音檔..."
+            )
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val copied = runCatching {
+                val cr = appCtx.contentResolver
+                val mime = cr.getType(uri).orEmpty().lowercase(Locale.ROOT)
+                var displayName = "imported_audio"
+                runCatching {
+                    cr.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                        if (c.moveToFirst()) displayName = c.getString(0).orEmpty().ifBlank { displayName }
+                    }
+                }
+                val ext = when {
+                    displayName.contains('.') -> displayName.substringAfterLast('.').lowercase(Locale.ROOT)
+                    mime.contains("mpeg") || mime.contains("mp3") -> "mp3"
+                    mime.contains("wav") -> "wav"
+                    mime.contains("ogg") -> "ogg"
+                    else -> "m4a"
+                }
+                val dir = java.io.File(appCtx.cacheDir, "imported_audio").apply { mkdirs() }
+                val destFile = java.io.File(dir, "import_${System.currentTimeMillis()}.$ext")
+                cr.openInputStream(uri)?.use { input ->
+                    java.io.FileOutputStream(destFile).use { output ->
+                        input.copyTo(output, bufferSize = 64 * 1024)
+                    }
+                } ?: throw IllegalStateException("無法讀取該音檔")
+                destFile to displayName
+            }
+            copied.onSuccess { (file, name) ->
+                processRecordedOrImportedAudioFile(
+                    audioFile = file,
+                    sourceLabel = "匯入音檔：$name",
+                    fallbackDurationSec = 0,
+                    deleteSourceAfter = true
+                )
+            }.onFailure { err ->
+                _uiState.update {
+                    it.copy(
+                        isTranscribingMeeting = false,
+                        meetingProgressMessage = "",
+                        errorToast = "匯入音檔失敗：${err.message}"
+                    )
+                }
+            }
+        }
+    }
+
+    private fun processRecordedOrImportedAudioFile(
+        audioFile: java.io.File,
+        sourceLabel: String,
+        fallbackDurationSec: Int,
+        deleteSourceAfter: Boolean
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
                 val apiKey = _uiState.value.settings.openAiApiKey.trim()
-                val transRes = meetingRecorder.transcribeAudioFile(recordedFile, apiKey)
-                runCatching { recordedFile.delete() }
-                transRes.onSuccess { transcript ->
+                val transRes = meetingRecorder.transcribeLongAudioFile(
+                    file = audioFile,
+                    apiKey = apiKey,
+                    onProgress = { cur, total, label ->
+                        val msg = if (total > 1) "📝 gpt-transcribe 轉寫 $label…" else "📝 gpt-transcribe 正在轉寫中…"
+                        _uiState.update { it.copy(meetingProgressMessage = msg, statusBanner = msg) }
+                    }
+                )
+                if (deleteSourceAfter) runCatching { audioFile.delete() }
+
+                transRes.onSuccess { (transcript, detectedSec) ->
+                    val durSec = if (detectedSec > 0) detectedSec else fallbackDurationSec
+                    val durMin = (durSec / 60.0).coerceAtLeast(0.1)
+                    val durLabel = if (durSec >= 3600) {
+                        "${durSec / 3600}小時${(durSec % 3600) / 60}分"
+                    } else if (durSec >= 60) {
+                        "${durSec / 60}分${durSec % 60}秒"
+                    } else {
+                        "${durSec}秒"
+                    }
+
                     val turnIdx = (_uiState.value.currentSession.messages.maxOfOrNull { it.turnIndex } ?: _uiState.value.currentSession.messages.size) + 1
                     onTranscriptDelta(
                         role = MessageRole.USER,
-                        delta = "🎙️ [會議／課程錄音逐字稿 · ${durSec}秒]\n$transcript",
+                        delta = "🎙️ [$sourceLabel · $durLabel]\n$transcript",
                         timelineMs = System.currentTimeMillis(),
                         modelTag = "gpt-transcribe",
                         streamKey = "meeting_transcript_$turnIdx",
                         turnIndex = turnIdx
                     )
-                    val summaryPrompt =
-                        "以下是一段剛錄製完成的會議或課程逐字稿，請幫我整理成清晰的繁體中文結構化紀要，包含：\n1. 📋 核心重點摘要（條列式）\n2. ✅ 關鍵決議與行動待辦事項（Action Items）\n\n逐字稿：\n$transcript"
+
+                    _uiState.update {
+                        it.copy(
+                            meetingProgressMessage = "🧠 正在整理結構化重點紀要與行動待辦…",
+                            statusBanner = "🧠 正在生成會議／課程結構化重點紀要…"
+                        )
+                    }
+
+                    // Hierarchical summary for very long (4-5 hour) transcripts so nothing gets truncated!
+                    val summaryInputText = if (transcript.length > 10_000) {
+                        val blocks = transcript.chunked(8500)
+                        val partialSummaries = mutableListOf<String>()
+                        blocks.forEachIndexed { idx, block ->
+                            _uiState.update {
+                                it.copy(meetingProgressMessage = "🧠 正在整理長文分段摘要 (${idx + 1} / ${blocks.size})…")
+                            }
+                            val partPrompt =
+                                "請將以下長篇錄音逐字稿的第 ${idx + 1}/${blocks.size} 部分整理成精煉的繁體中文重點與待辦事項（保留時間標記與關鍵數據）：\n\n$block"
+                            val partRes = backendLlmClient.runDelegatedTask(
+                                settings = _uiState.value.settings,
+                                conversationHistory = emptyList(),
+                                taskHint = partPrompt,
+                                onThinkingStatusUpdate = {},
+                                onSearchExecuted = {},
+                                onCalendarActionLogged = {}
+                            ).getOrNull()
+                            partialSummaries.add("【第 ${idx + 1} 時段整理】\n" + (partRes?.detailedNotes?.ifBlank { partRes.spokenSummary } ?: block.take(1200)))
+                        }
+                        "以下是超長錄音（共 $durLabel）各時段的分段重點整理，請綜合成一份完整的繁體中文結構化總結：\n1. 📋 全場核心結論與重點摘要\n2. 🕒 各時段重點回顧\n3. ✅ 全部關鍵決議與行動待辦事項（Action Items）\n\n" +
+                                partialSummaries.joinToString("\n\n")
+                    } else {
+                        "以下是一段錄音逐字稿（$sourceLabel · $durLabel），請幫我整理成清晰的繁體中文結構化紀要，包含：\n1. 📋 核心重點摘要（條列式）\n2. ✅ 關鍵決議與行動待辦事項（Action Items）\n\n逐字稿：\n$transcript"
+                    }
+
                     val summaryRes = backendLlmClient.runDelegatedTask(
                         settings = _uiState.value.settings,
                         conversationHistory = emptyList(),
-                        taskHint = summaryPrompt,
+                        taskHint = summaryInputText,
                         onThinkingStatusUpdate = {},
                         onSearchExecuted = {},
                         onCalendarActionLogged = {}
@@ -472,8 +598,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
                         _uiState.update {
                             it.copy(
                                 isTranscribingMeeting = false,
-                                statusBanner = "✅ 會議逐字稿與重點紀要已完成！",
-                                errorToast = "✅ 會議錄音轉寫與摘要完成（約台幣 ${String.format(Locale.US, "%.1f", (durSec / 60.0) * 0.096)} 元）"
+                                meetingProgressMessage = "",
+                                statusBanner = "✅ 錄音轉寫與結構化紀要已完成！",
+                                errorToast = "✅ 轉寫與摘要完成（$durLabel · 預估約台幣 ${String.format(Locale.US, "%.1f", durMin * 0.096)} 元）"
                             )
                         }
                         triggerAiTitleGenerationIfNeeded()
@@ -481,7 +608,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
                         _uiState.update {
                             it.copy(
                                 isTranscribingMeeting = false,
-                                errorToast = "摘要生成失敗（逐字稿已保存）：${err.message}"
+                                meetingProgressMessage = "",
+                                errorToast = "摘要生成失敗（逐字稿已完整保存）：${err.message}"
                             )
                         }
                     }
@@ -489,10 +617,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
                     _uiState.update {
                         it.copy(
                             isTranscribingMeeting = false,
-                            statusBanner = "會議轉寫失敗",
+                            meetingProgressMessage = "",
+                            statusBanner = "錄音轉寫失敗",
                             errorToast = "gpt-transcribe 轉寫失敗：${err.message}"
                         )
                     }
+                }
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(
+                        isTranscribingMeeting = false,
+                        meetingProgressMessage = "",
+                        errorToast = "音檔處理錯誤：${e.message}"
+                    )
                 }
             }
         }

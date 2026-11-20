@@ -77,6 +77,7 @@ internal fun CatherineOrbWorkspace(
     onTriggerTutorQuickAction: (String) -> Unit,
     onToggleCall: () -> Unit,
     onToggleMeetingRecording: () -> Unit,
+    onImportAudioUri: (Uri) -> Unit,
     onToggleMute: () -> Unit,
     onToggleSpeaker: () -> Unit,
     onSendTypedMessage: (String) -> Unit,
@@ -94,6 +95,7 @@ internal fun CatherineOrbWorkspace(
     var showTranscriptView by remember { mutableStateOf(false) }
     var typedInput by remember { mutableStateOf("") }
     var showImagePickerSheet by remember { mutableStateOf(false) }
+    var showMeetingSheet by remember { mutableStateOf(false) }
 
     val messages = uiState.currentSession.messages
     val listState = rememberLazyListState()
@@ -122,6 +124,13 @@ internal fun CatherineOrbWorkspace(
                     showTranscriptView = true
                 }
             }
+        }
+    }
+    val audioPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            onImportAudioUri(uri)
         }
     }
 
@@ -182,7 +191,7 @@ internal fun CatherineOrbWorkspace(
                             Spacer(modifier = Modifier.height(28.dp))
 
                             val heroStatus = when {
-                                uiState.isTranscribingMeeting -> "📝 gpt-transcribe 正在轉寫與摘要會議…"
+                                uiState.isTranscribingMeeting -> uiState.meetingProgressMessage.ifBlank { "📝 gpt-transcribe 正在轉寫與摘要會議…" }
                                 uiState.isMeetingRecording -> {
                                     val m = uiState.meetingRecordingSeconds / 60
                                     val sec = uiState.meetingRecordingSeconds % 60
@@ -312,7 +321,11 @@ internal fun CatherineOrbWorkspace(
                                         if (uiState.isMeetingRecording) CatherineCrimson else Color.White.copy(alpha = 0.14f)
                                     ),
                                     modifier = Modifier.clickable(enabled = !uiState.isTranscribingMeeting) {
-                                        onToggleMeetingRecording()
+                                        if (uiState.isMeetingRecording) {
+                                            onToggleMeetingRecording()
+                                        } else {
+                                            showMeetingSheet = true
+                                        }
                                     }
                                 ) {
                                     Text(
@@ -634,6 +647,59 @@ internal fun CatherineOrbWorkspace(
                     Icon(Icons.Default.PhotoLibrary, contentDescription = null, tint = Color.White)
                     Spacer(modifier = Modifier.width(8.dp))
                     Text("從相簿選擇圖片", color = Color.White)
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+            }
+        }
+    }
+
+    if (showMeetingSheet) {
+        ModalBottomSheet(
+            onDismissRequest = { showMeetingSheet = false },
+            containerColor = Color(0xFF0F141F),
+            contentColor = Color.White
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = "🎙️ 會議／課程錄音與超長音檔轉寫",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = "採用最新 gpt-transcribe（1 小時約台幣 5.8 元），超過 15 分鐘自動本機無損分段，支援 4～5 小時超長錄音並自動整理重點摘要！",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFF94A3B8)
+                )
+                Button(
+                    onClick = {
+                        showMeetingSheet = false
+                        onToggleMeetingRecording()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = CatherineCrimson, contentColor = Color.White),
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Default.FiberManualRecord, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("開始即時錄音（純本機零流量）", fontWeight = FontWeight.Bold)
+                }
+                OutlinedButton(
+                    onClick = {
+                        showMeetingSheet = false
+                        audioPickerLauncher.launch("audio/*")
+                    },
+                    border = BorderStroke(1.dp, CatherineCyan.copy(alpha = 0.55f)),
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Default.AudioFile, contentDescription = null, tint = CatherineCyan)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("📂 匯入既有錄音檔（MP3 / M4A / WAV）", color = Color(0xFFBAE6FD), fontWeight = FontWeight.SemiBold)
                 }
                 Spacer(modifier = Modifier.height(16.dp))
             }

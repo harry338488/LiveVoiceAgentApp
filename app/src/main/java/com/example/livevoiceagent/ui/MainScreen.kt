@@ -353,6 +353,7 @@ fun MainScreen(
                         onTriggerTutorQuickAction = { viewModel.triggerTutorQuickAction(it) },
                         onToggleCall = onRequestMicPermissionAndToggleCall,
                         onToggleMeetingRecording = { viewModel.toggleMeetingRecording() },
+                        onImportAudioUri = { uri -> viewModel.importAndTranscribeAudioUri(uri) },
                         onToggleMute = { viewModel.toggleMute() },
                         onToggleSpeaker = { viewModel.toggleSpeakerphone() },
                         onSendTypedMessage = { viewModel.sendTypedMessage(it) },

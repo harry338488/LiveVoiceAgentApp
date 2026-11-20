@@ -186,6 +186,18 @@ class MainActivity : ComponentActivity() {
                     Toast.makeText(this, "📲 已收到分享內容，Catherine 正在整理重點！", Toast.LENGTH_SHORT).show()
                 }
                 return
+            } else if (mimeType.startsWith("audio/")) {
+                val audioUri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableExtra(Intent.EXTRA_STREAM)
+                }
+                if (audioUri != null) {
+                    mainViewModel.importAndTranscribeAudioUri(audioUri)
+                    Toast.makeText(this, "🎙️ 已收到分享錄音檔，正在自動分段轉寫與摘要！", Toast.LENGTH_SHORT).show()
+                }
+                return
             }
         }
 
