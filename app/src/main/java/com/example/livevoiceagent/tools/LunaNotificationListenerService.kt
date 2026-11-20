@@ -1,11 +1,14 @@
 package com.example.livevoiceagent.tools
 
 import android.app.Notification
+import android.content.ComponentName
 import android.content.Context
-import android.content.pm.PackageManager
+import android.os.Build
+import android.os.Bundle
 import android.provider.Settings
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
+import java.lang.ref.WeakReference
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -20,50 +23,114 @@ data class CapturedNotificationItem(
 )
 
 /**
- * Captures recent user notifications (LINE, SMS, Gmail, Messenger, etc.) in memory so Luna can
- * read out recent messages hands-free when the user asks "剛剛有誰傳訊息給我？" or "幫我唸最新通知".
+ * Captures both currently active status-bar notifications (via `activeNotifications` on connect & on demand)
+ * and newly posted notifications (LINE, SMS, Gmail, Messenger, etc.), including MessagingStyle & InboxStyle lines.
  */
 class LunaNotificationListenerService : NotificationListenerService() {
 
+    override fun onListenerConnected() {
+        super.onListenerConnected()
+        activeServiceRef = WeakReference(this)
+        syncFromActiveNotifications()
+    }
+
+    override fun onListenerDisconnected() {
+        super.onListenerDisconnected()
+        activeServiceRef = null
+    }
+
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
+        activeServiceRef = WeakReference(this)
         val item = sbn ?: return
-        if (item.isOngoing) return
-        val pkg = item.packageName ?: return
-        if (pkg == packageName || pkg == "android" || pkg == "com.android.systemui") return
-
-        val extras = item.notification?.extras ?: return
-        val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.trim().orEmpty()
-        val text = (extras.getCharSequence(Notification.EXTRA_BIG_TEXT)
-            ?: extras.getCharSequence(Notification.EXTRA_TEXT))?.toString()?.trim().orEmpty()
-
-        if (title.isBlank() && text.isBlank()) return
-
-        val appLabel = runCatching {
-            val pm = applicationContext.packageManager
-            val ai = pm.getApplicationInfo(pkg, 0)
-            pm.getApplicationLabel(ai).toString()
-        }.getOrDefault(pkg.substringAfterLast('.'))
-
-        val entry = CapturedNotificationItem(
-            packageName = pkg,
-            appLabel = appLabel,
-            title = title,
-            text = text,
-            timestampMs = item.postTime.takeIf { it > 0L } ?: System.currentTimeMillis()
-        )
-
-        // Deduplicate identical consecutive notifications
-        recentNotifications.removeAll {
-            it.packageName == entry.packageName && it.title == entry.title && it.text == entry.text
+        parseStatusBarNotification(this, item)?.let { entry ->
+            recordEntry(entry)
         }
-        recentNotifications.add(0, entry)
-        while (recentNotifications.size > 25) {
-            recentNotifications.removeAt(recentNotifications.lastIndex)
+    }
+
+    private fun syncFromActiveNotifications() {
+        runCatching {
+            val active = activeNotifications ?: return
+            active.sortedBy { it.postTime }.forEach { sbn ->
+                parseStatusBarNotification(this, sbn)?.let { recordEntry(it) }
+            }
         }
     }
 
     companion object {
         private val recentNotifications = CopyOnWriteArrayList<CapturedNotificationItem>()
+        @Volatile
+        private var activeServiceRef: WeakReference<LunaNotificationListenerService>? = null
+
+        private fun recordEntry(entry: CapturedNotificationItem) {
+            recentNotifications.removeAll {
+                it.packageName == entry.packageName && it.title == entry.title && it.text == entry.text
+            }
+            recentNotifications.add(0, entry)
+            recentNotifications.sortByDescending { it.timestampMs }
+            while (recentNotifications.size > 35) {
+                recentNotifications.removeAt(recentNotifications.lastIndex)
+            }
+        }
+
+        private fun parseStatusBarNotification(
+            context: Context,
+            item: StatusBarNotification
+        ): CapturedNotificationItem? {
+            if (item.isOngoing) return null
+            val pkg = item.packageName ?: return null
+            if (pkg == context.packageName || pkg == "android" || pkg == "com.android.systemui") return null
+            val notif = item.notification ?: return null
+            if ((notif.flags and Notification.FLAG_GROUP_SUMMARY) != 0) return null
+
+            val extras = notif.extras ?: return null
+            val title = (extras.getCharSequence(Notification.EXTRA_CONVERSATION_TITLE)
+                ?: extras.getCharSequence(Notification.EXTRA_TITLE))?.toString()?.trim().orEmpty()
+
+            // Extract rich body: MessagingStyle (LINE/Messenger/WhatsApp) -> InboxStyle lines -> BigText -> Text
+            val richText = buildString {
+                val msgBundles = extras.getParcelableArray(Notification.EXTRA_MESSAGES)
+                if (!msgBundles.isNullOrEmpty()) {
+                    val lastMsgs = msgBundles.takeLast(3).mapNotNull { it as? Bundle }.mapNotNull { b ->
+                        val sender = b.getCharSequence("sender")?.toString()?.trim().orEmpty()
+                        val msg = b.getCharSequence("text")?.toString()?.trim().orEmpty()
+                        when {
+                            msg.isBlank() -> null
+                            sender.isNotBlank() && sender != title -> "$sender: $msg"
+                            else -> msg
+                        }
+                    }
+                    if (lastMsgs.isNotEmpty()) append(lastMsgs.joinToString(" / "))
+                }
+                if (isEmpty()) {
+                    val lines = extras.getCharSequenceArray(Notification.EXTRA_TEXT_LINES)
+                    if (!lines.isNullOrEmpty()) {
+                        append(lines.takeLast(3).mapNotNull { it?.toString()?.trim()?.takeIf { s -> s.isNotBlank() } }.joinToString(" / "))
+                    }
+                }
+                if (isEmpty()) {
+                    val body = (extras.getCharSequence(Notification.EXTRA_BIG_TEXT)
+                        ?: extras.getCharSequence(Notification.EXTRA_TEXT)
+                        ?: extras.getCharSequence(Notification.EXTRA_SUB_TEXT))?.toString()?.trim().orEmpty()
+                    append(body)
+                }
+            }.trim()
+
+            if (title.isBlank() && richText.isBlank()) return null
+
+            val appLabel = runCatching {
+                val pm = context.applicationContext.packageManager
+                val ai = pm.getApplicationInfo(pkg, 0)
+                pm.getApplicationLabel(ai).toString()
+            }.getOrDefault(pkg.substringAfterLast('.'))
+
+            return CapturedNotificationItem(
+                packageName = pkg,
+                appLabel = appLabel,
+                title = title.ifBlank { appLabel },
+                text = richText.ifBlank { "（無內文預覽）" },
+                timestampMs = item.postTime.takeIf { it > 0L } ?: System.currentTimeMillis()
+            )
+        }
 
         fun isNotificationAccessEnabled(context: Context): Boolean {
             return runCatching {
@@ -75,36 +142,48 @@ class LunaNotificationListenerService : NotificationListenerService() {
             }.getOrDefault(false)
         }
 
-        fun getRecentNotificationsSummary(limit: Int = 10): List<CapturedNotificationItem> {
-            return recentNotifications.take(limit.coerceIn(1, 25))
-        }
-
         fun formatRecentNotificationsForLlm(context: Context, appFilter: String = ""): String {
             if (!isNotificationAccessEnabled(context)) {
-                return "尚未開啟「通知讀取權限 (Notification Access)」。請提醒使用者可在「語音喚醒與聲紋鎖」設定視窗中點擊「🔔 一鍵授權通知讀取」，即可讓 Luna 幫您朗讀 LINE 與簡訊通知。"
+                return "尚未開啟「通知讀取權限 (Notification Access)」。請提醒使用者可在「語音喚醒設定」中點擊「🔔 一鍵開啟通知讀取權限」，即可讓 Catherine 幫您朗讀 LINE 與簡訊通知。"
             }
+
+            // Pull live active notifications from the status bar right now!
+            val svc = activeServiceRef?.get()
+            if (svc != null) {
+                svc.syncFromActiveNotifications()
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                runCatching {
+                    requestRebind(ComponentName(context, LunaNotificationListenerService::class.java))
+                }
+            }
+
             val filterNorm = appFilter.trim().lowercase(Locale.ROOT)
             val filtered = recentNotifications.filter { item ->
                 if (filterNorm.isBlank()) true
                 else item.appLabel.lowercase(Locale.ROOT).contains(filterNorm) ||
                         item.packageName.lowercase(Locale.ROOT).contains(filterNorm) ||
                         item.title.lowercase(Locale.ROOT).contains(filterNorm)
-            }.take(10)
+            }.take(12)
 
             if (filtered.isEmpty()) {
-                return if (filterNorm.isBlank()) {
-                    "目前暫無收到新的訊息或通知紀錄。"
+                return if (svc == null) {
+                    "系統通知服務剛剛重新連線中（更新 App 後 Android 會重新綁定通知監聽），請稍候幾秒再試，或到系統通知讀取權限重新開關一次「Catherine 通知朗讀助手」。"
+                } else if (filterNorm.isBlank()) {
+                    "目前通知欄與近期紀錄中沒有未讀的新訊息或通知。"
                 } else {
                     "目前沒有找到與「$appFilter」相關的最新通知。"
                 }
             }
 
             val fmt = SimpleDateFormat("HH:mm", Locale.getDefault())
+            val nowMs = System.currentTimeMillis()
             return buildString {
-                appendLine("📬 最新收到的手機通知（共 ${filtered.size} 則）：")
+                appendLine("📬 目前手機通知欄與最新收到的通知（共 ${filtered.size} 則）：")
                 filtered.forEachIndexed { idx, n ->
                     val timeStr = fmt.format(Date(n.timestampMs))
-                    appendLine("${idx + 1}. [$timeStr] 【${n.appLabel}】${n.title}：${n.text}")
+                    val agoMin = ((nowMs - n.timestampMs) / 60_000L).coerceAtLeast(0L)
+                    val agoStr = if (agoMin < 60) "${agoMin}分鐘前" else "${agoMin / 60}小時前"
+                    appendLine("${idx + 1}. [$timeStr · $agoStr] 【${n.appLabel}】${n.title}：${n.text.take(180)}")
                 }
             }.trim()
         }
