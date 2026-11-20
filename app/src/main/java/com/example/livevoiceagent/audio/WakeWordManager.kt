@@ -469,13 +469,13 @@ class WakeWordManager(
                     val frameRms = sqrt(sumSq / read).toFloat()
                     val frameCopy = frameBuf.copyOf(read)
 
-                    // Strict near-field speech threshold: rejects silent room hum, AC/fan noise, and faint distant sounds
-                    val onsetThreshold = (ambientNoiseRms * 3.0f).coerceIn(0.032f, 0.068f)
-                    val sustainThreshold = (ambientNoiseRms * 2.1f).coerceIn(0.022f, 0.048f)
+                    // Balanced near-to-mid field speech threshold (calibrated for short 3-4 syllable "hey Catherine" at desk distance)
+                    val onsetThreshold = (ambientNoiseRms * 2.5f).coerceIn(0.018f, 0.052f)
+                    val sustainThreshold = (ambientNoiseRms * 1.8f).coerceIn(0.012f, 0.036f)
 
                     if (!isCollectingSpeech) {
                         if (frameRms < onsetThreshold) {
-                            ambientNoiseRms = (ambientNoiseRms * 0.96f + frameRms * 0.04f).coerceIn(0.004f, 0.028f)
+                            ambientNoiseRms = (ambientNoiseRms * 0.96f + frameRms * 0.04f).coerceIn(0.003f, 0.022f)
                             consecutiveActiveFrames = 0
                         } else {
                             consecutiveActiveFrames++
@@ -486,8 +486,8 @@ class WakeWordManager(
                         }
                         preRollFrames.addLast(frameCopy)
 
-                        // Trigger utterance capture after 3 consecutive voiced frames (~96ms)
-                        if (consecutiveActiveFrames >= 3) {
+                        // Trigger utterance capture after 2 consecutive voiced frames (~64ms)
+                        if (consecutiveActiveFrames >= 2) {
                             isCollectingSpeech = true
                             consecutiveSilentFrames = 0
                             voicedFramesInUtterance = consecutiveActiveFrames
@@ -513,8 +513,8 @@ class WakeWordManager(
                             consecutiveSilentFrames++
                         }
 
-                        // End of utterance when speaker pauses for ~600ms (19 frames) or hits 4.2s cap
-                        val endedByPause = consecutiveSilentFrames >= 19
+                        // End of utterance when speaker pauses for ~512ms (16 frames) or hits 4.2s cap
+                        val endedByPause = consecutiveSilentFrames >= 16
                         val endedByMaxLen = speechFrames.size >= (maxSpeechFrames + preRollCapacity)
 
                         if (endedByPause || endedByMaxLen) {
@@ -529,14 +529,14 @@ class WakeWordManager(
                             maxRmsInUtterance = 0f
                             sumRmsInUtterance = 0f
 
-                            // Strict human wake-phrase gate:
-                            // 1) At least 16 voiced frames (~0.51s of active speech) & 28 total frames (~0.90s)
-                            // 2) Peak near-field RMS >= 0.048f (ignores quiet room noise / breathing)
-                            // 3) Syllable modulation ratio >= 1.42f (ignores flat steady fan/AC hum)
-                            if (capturedVoicedCount >= 16 &&
-                                totalFrameCount >= 28 &&
-                                peakRms >= 0.048f &&
-                                modulationRatio >= 1.42f
+                            // Calibrated wake-phrase gate for short phrases like "hey Catherine" (~0.65s-1.2s):
+                            // 1) At least 6 voiced frames (~0.19s active vowels) & 20 total frames (~0.64s incl. pre-roll)
+                            // 2) Peak RMS >= 0.024f (works reliably at desk distance 0.5m-1m while ignoring room hum)
+                            // 3) Syllable modulation ratio >= 1.32f (still rejects flat steady fan/AC hum)
+                            if (capturedVoicedCount >= 6 &&
+                                totalFrameCount >= 20 &&
+                                peakRms >= 0.024f &&
+                                modulationRatio >= 1.32f
                             ) {
                                 val totalSamples = speechFrames.sumOf { it.size }
                                 val fullPcm = ShortArray(totalSamples)
@@ -617,7 +617,7 @@ class WakeWordManager(
             samples = pcmSamples,
             length = pcmSamples.size,
             sampleRate = sampleRate,
-            minVoicedFrames = 8
+            minVoicedFrames = 5
         ) ?: return false
 
         var similarityScore = 95
@@ -641,7 +641,7 @@ class WakeWordManager(
                 candidateProfile.temporalEnvelope.size == 48 &&
                 similarityScore >= 84 &&
                 dtwSim >= 0.84f &&
-                durationSec in 1.15f..3.15f
+                durationSec in 0.65f..3.15f
             ) {
                 lastTriggerWallMs = System.currentTimeMillis()
                 isPausedForActiveCall = true
@@ -910,8 +910,8 @@ class WakeWordManager(
             val zeroLagEnergy = sumSq / frameSize
             val rms = sqrt(zeroLagEnergy)
 
-            // Require clear human speech frame energy (rms > 0.025)
-            if (rms > 0.025) {
+            // Require clear human speech frame energy (rms > 0.014, desk-distance friendly)
+            if (rms > 0.014) {
                 // Estimate Fundamental Pitch F0 via Normalized Autocorrelation (85 Hz .. 350 Hz)
                 val minLag = sampleRate / 350
                 val maxLag = sampleRate / 85
@@ -937,9 +937,9 @@ class WakeWordManager(
                     }
                 }
 
-                // Normalized harmonicity ratio: periodic human vocal cords have >= 0.34; random noise is < 0.22
+                // Normalized harmonicity ratio: periodic human vocal cords have >= 0.30; random noise is < 0.20
                 val harmonicity = maxCorr / zeroLagEnergy.coerceAtLeast(1e-7)
-                if (harmonicity >= 0.34) {
+                if (harmonicity >= 0.30) {
                     periodicVoicedFrames++
                     pitches.add(sampleRate.toFloat() / bestLag)
                     zcrs.add(zeroCrossings.toFloat() / frameSize)
