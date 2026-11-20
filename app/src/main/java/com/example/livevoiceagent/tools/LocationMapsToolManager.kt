@@ -242,6 +242,7 @@ class LocationMapsToolManager(
                     linkupApiKey = linkupApiKey,
                     googleMapsApiKey = googleMapsApiKey
                 )
+                "control_media_and_music" -> executeControlMediaAndMusic(argsJson)
                 "end_live_voice_session" -> executeEndLiveVoiceSession(argsJson)
                 else -> LocationToolExecutionResult(
                     toolOutputJson = JSONObject().put("status", "error")
@@ -1509,6 +1510,99 @@ class LocationMapsToolManager(
         )
     }
 
+    private fun executeControlMediaAndMusic(argsJson: JSONObject): LocationToolExecutionResult {
+        val action = argsJson.optString("action", "").lowercase(Locale.ROOT).trim()
+        val query = argsJson.optString("query", "").trim()
+        val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+
+        fun sendMediaKey(keyCode: Int) {
+            val now = android.os.SystemClock.uptimeMillis()
+            audioManager.dispatchMediaKeyEvent(android.view.KeyEvent(now, now, android.view.KeyEvent.ACTION_DOWN, keyCode, 0))
+            audioManager.dispatchMediaKeyEvent(android.view.KeyEvent(now, now, android.view.KeyEvent.ACTION_UP, keyCode, 0))
+        }
+
+        val statusMsg: String
+        when (action) {
+            "play_query" -> {
+                if (query.isBlank()) {
+                    sendMediaKey(android.view.KeyEvent.KEYCODE_MEDIA_PLAY)
+                    statusMsg = "已恢復播放手機音樂！"
+                } else {
+                    Handler(Looper.getMainLooper()).post {
+                        runCatching {
+                            val intent = Intent(android.provider.MediaStore.INTENT_ACTION_MEDIA_PLAY_FROM_SEARCH).apply {
+                                putExtra(android.app.SearchManager.QUERY, query)
+                                putExtra(android.provider.MediaStore.EXTRA_MEDIA_FOCUS, "vnd.android.cursor.item/*")
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            if (intent.resolveActivity(context.packageManager) != null) {
+                                context.startActivity(intent)
+                            } else {
+                                // Fallback to YouTube Music / YouTube search
+                                val ytIntent = Intent(Intent.ACTION_VIEW, Uri.parse("https://music.youtube.com/search?q=${URLEncoder.encode(query, "UTF-8")}")).apply {
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                                context.startActivity(ytIntent)
+                            }
+                        }
+                    }
+                    statusMsg = "已為您啟動播放「$query」！"
+                }
+            }
+            "pause" -> {
+                sendMediaKey(android.view.KeyEvent.KEYCODE_MEDIA_PAUSE)
+                statusMsg = "已暫停手機音樂播放。"
+            }
+            "resume", "play" -> {
+                sendMediaKey(android.view.KeyEvent.KEYCODE_MEDIA_PLAY)
+                statusMsg = "已繼續播放手機音樂。"
+            }
+            "next" -> {
+                sendMediaKey(android.view.KeyEvent.KEYCODE_MEDIA_NEXT)
+                statusMsg = "已切換到下一首歌曲。"
+            }
+            "previous", "prev" -> {
+                sendMediaKey(android.view.KeyEvent.KEYCODE_MEDIA_PREVIOUS)
+                statusMsg = "已切換回上一首歌曲。"
+            }
+            "volume_up" -> {
+                repeat(2) {
+                    audioManager.adjustStreamVolume(
+                        android.media.AudioManager.STREAM_MUSIC,
+                        android.media.AudioManager.ADJUST_RAISE,
+                        android.media.AudioManager.FLAG_SHOW_UI
+                    )
+                }
+                statusMsg = "已將媒體音量調大。"
+            }
+            "volume_down" -> {
+                repeat(2) {
+                    audioManager.adjustStreamVolume(
+                        android.media.AudioManager.STREAM_MUSIC,
+                        android.media.AudioManager.ADJUST_LOWER,
+                        android.media.AudioManager.FLAG_SHOW_UI
+                    )
+                }
+                statusMsg = "已將媒體音量調小。"
+            }
+            else -> {
+                sendMediaKey(android.view.KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE)
+                statusMsg = "已切換音樂播放／暫停狀態。"
+            }
+        }
+
+        val out = JSONObject().apply {
+            put("status", "success")
+            put("action", action)
+            if (query.isNotBlank()) put("query", query)
+            put("message", statusMsg)
+        }.toString()
+        return LocationToolExecutionResult(
+            toolOutputJson = out,
+            actionLogText = "🎵 音樂控制：$statusMsg"
+        )
+    }
+
     companion object {
         const val NAVIGATION_RULES =
             "【導航規則】①只要使用者表達想前往某地（導航到/帶我去/我要去/去…怎麼走/開車騎車走路去…），一律立即呼叫 open_google_maps_navigation 直接跳轉，不需要使用者說「跳轉」，也不要先反問。" +
@@ -1588,6 +1682,7 @@ class LocationMapsToolManager(
             "save_user_memory",
             "manage_todo_list",
             "get_morning_commute_briefing",
+            "control_media_and_music",
             "end_live_voice_session"
         )
 
@@ -1860,6 +1955,29 @@ class LocationMapsToolManager(
                     put("parameters", JSONObject().apply {
                         put("type", "object")
                         put("properties", JSONObject())
+                    })
+                },
+                JSONObject().apply {
+                    put("type", "function")
+                    put("name", "control_media_and_music")
+                    put(
+                        "description",
+                        "當使用者要求控制手機音樂或音量（例如『幫我播周杰倫的歌』、『下一首』、『上一首』、『暫停音樂』、『繼續播放』、『音量調大/調小』）時呼叫。"
+                    )
+                    put("parameters", JSONObject().apply {
+                        put("type", "object")
+                        put("properties", JSONObject().apply {
+                            put("action", JSONObject().apply {
+                                put("type", "string")
+                                put("enum", JSONArray().put("play_query").put("pause").put("resume").put("next").put("previous").put("volume_up").put("volume_down"))
+                                put("description", "操作類型：play_query (搜尋並播放指定歌手/歌曲)、pause (暫停)、resume (繼續)、next (下一首)、previous (上一首)、volume_up (音量調大)、volume_down (音量調小)")
+                            })
+                            put("query", JSONObject().apply {
+                                put("type", "string")
+                                put("description", "（play_query 時使用）歌手、歌名或音樂類型，例如『周杰倫』、『Lo-fi 輕音樂』")
+                            })
+                        })
+                        put("required", JSONArray().put("action"))
                     })
                 }
             )

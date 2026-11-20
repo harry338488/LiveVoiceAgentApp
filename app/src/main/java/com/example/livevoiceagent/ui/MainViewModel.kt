@@ -58,6 +58,9 @@ data class UiState(
     val wakeWordStandbyStatus: String = "語音喚醒待機已關閉",
     val isEnrollingVoiceprint: Boolean = false,
     val voiceprintStatusMessage: String = "",
+    val isMeetingRecording: Boolean = false,
+    val meetingRecordingSeconds: Int = 0,
+    val isTranscribingMeeting: Boolean = false,
     val errorToast: String? = null
 )
 
@@ -97,6 +100,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
         context = application.applicationContext,
         onToggleMute = { toggleMute() },
         onHangupCall = { stopLiveCall() }
+    )
+
+    private val meetingRecorder = com.example.livevoiceagent.audio.MeetingRecorderManager(application.applicationContext)
+    private var meetingTimerJob: Job? = null
+
+    private val powerButtonDetector = com.example.livevoiceagent.audio.PowerButtonTriplePressDetector(
+        context = application.applicationContext,
+        onTriplePressDetected = {
+            if (_uiState.value.settings.powerButtonTriplePressEnabled &&
+                _uiState.value.connectionState == ConnectionState.DISCONNECTED
+            ) {
+                wakeWordManager.playWakeChimeAndVibrate()
+                runCatching {
+                    val appCtx = getApplication<Application>().applicationContext
+                    val openIntent = Intent(appCtx, MainActivity::class.java).apply {
+                        action = MainActivity.ACTION_START_VOICE_CHAT
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                    }
+                    appCtx.startActivity(openIntent)
+                }
+                startLiveCall(isWakeWordSession = true)
+            }
+        }
     )
 
     private val _uiState = MutableStateFlow(UiState())
@@ -183,6 +209,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
             if (loadedSettings.wakeWordEnabled) {
                 wakeWordManager.startStandby(loadedSettings)
             }
+            if (loadedSettings.powerButtonTriplePressEnabled) {
+                powerButtonDetector.start()
+            }
         }
     }
 
@@ -265,6 +294,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
             }
         }
         val cur = _uiState.value
+        if (cur.settings.powerButtonTriplePressEnabled) {
+            powerButtonDetector.start()
+        } else {
+            powerButtonDetector.stop()
+        }
         floatingVoicePill.updatePillState(
             enabled = newSettings.floatingVoicePillEnabled,
             connectionState = cur.connectionState,
@@ -359,6 +393,111 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
         }
     }
 
+    fun toggleMeetingRecording() {
+        val state = _uiState.value
+        if (state.isTranscribingMeeting) return
+
+        if (!state.isMeetingRecording) {
+            if (state.connectionState != ConnectionState.DISCONNECTED) {
+                stopLiveCall()
+            }
+            wakeWordManager.stopStandby()
+            val res = meetingRecorder.startRecording()
+            res.onSuccess {
+                _uiState.update {
+                    it.copy(
+                        isMeetingRecording = true,
+                        meetingRecordingSeconds = 0,
+                        statusBanner = "🎙️ 會議錄音中（純本機零流量 · 結束後以 gpt-transcribe 轉寫摘要）"
+                    )
+                }
+                meetingTimerJob?.cancel()
+                meetingTimerJob = viewModelScope.launch {
+                    while (true) {
+                        delay(1000L)
+                        _uiState.update { it.copy(meetingRecordingSeconds = it.meetingRecordingSeconds + 1) }
+                    }
+                }
+            }.onFailure { err ->
+                _uiState.update { it.copy(errorToast = "啟動會議錄音失敗：${err.message}") }
+            }
+        } else {
+            meetingTimerJob?.cancel()
+            meetingTimerJob = null
+            val recordedFile = meetingRecorder.stopRecording()
+            val durSec = _uiState.value.meetingRecordingSeconds
+            _uiState.update {
+                it.copy(
+                    isMeetingRecording = false,
+                    isTranscribingMeeting = recordedFile != null,
+                    statusBanner = if (recordedFile != null) "📝 正在透過 gpt-transcribe 轉寫 ${durSec} 秒錄音並生成重點摘要..." else "錄音過短已取消"
+                )
+            }
+            if (recordedFile == null) return
+
+            viewModelScope.launch(Dispatchers.IO) {
+                val apiKey = _uiState.value.settings.openAiApiKey.trim()
+                val transRes = meetingRecorder.transcribeAudioFile(recordedFile, apiKey)
+                runCatching { recordedFile.delete() }
+                transRes.onSuccess { transcript ->
+                    val turnIdx = (_uiState.value.currentSession.messages.maxOfOrNull { it.turnIndex } ?: _uiState.value.currentSession.messages.size) + 1
+                    onTranscriptDelta(
+                        role = MessageRole.USER,
+                        delta = "🎙️ [會議／課程錄音逐字稿 · ${durSec}秒]\n$transcript",
+                        timelineMs = System.currentTimeMillis(),
+                        modelTag = "gpt-transcribe",
+                        streamKey = "meeting_transcript_$turnIdx",
+                        turnIndex = turnIdx
+                    )
+                    val summaryPrompt =
+                        "以下是一段剛錄製完成的會議或課程逐字稿，請幫我整理成清晰的繁體中文結構化紀要，包含：\n1. 📋 核心重點摘要（條列式）\n2. ✅ 關鍵決議與行動待辦事項（Action Items）\n\n逐字稿：\n$transcript"
+                    val summaryRes = backendLlmClient.runDelegatedTask(
+                        settings = _uiState.value.settings,
+                        conversationHistory = emptyList(),
+                        taskHint = summaryPrompt,
+                        onThinkingStatusUpdate = {},
+                        onSearchExecuted = {},
+                        onCalendarActionLogged = {}
+                    )
+                    summaryRes.onSuccess { brain ->
+                        val notes = brain.detailedNotes.ifBlank { brain.spokenSummary }
+                        onTranscriptDelta(
+                            role = MessageRole.ASSISTANT_VOICE,
+                            delta = notes,
+                            timelineMs = System.currentTimeMillis(),
+                            modelTag = "📋 會議紀要 (${_uiState.value.settings.backendBrainModel})",
+                            streamKey = "meeting_summary_$turnIdx",
+                            turnIndex = turnIdx
+                        )
+                        _uiState.update {
+                            it.copy(
+                                isTranscribingMeeting = false,
+                                statusBanner = "✅ 會議逐字稿與重點紀要已完成！",
+                                errorToast = "✅ 會議錄音轉寫與摘要完成（約台幣 ${String.format(Locale.US, "%.1f", (durSec / 60.0) * 0.096)} 元）"
+                            )
+                        }
+                        triggerAiTitleGenerationIfNeeded()
+                    }.onFailure { err ->
+                        _uiState.update {
+                            it.copy(
+                                isTranscribingMeeting = false,
+                                errorToast = "摘要生成失敗（逐字稿已保存）：${err.message}"
+                            )
+                        }
+                    }
+                }.onFailure { err ->
+                    _uiState.update {
+                        it.copy(
+                            isTranscribingMeeting = false,
+                            statusBanner = "會議轉寫失敗",
+                            errorToast = "gpt-transcribe 轉寫失敗：${err.message}"
+                        )
+                    }
+                }
+            }
+        }
+    }
+
     fun toggleLiveCall() {
         val state = _uiState.value
         if (state.connectionState == ConnectionState.DISCONNECTED) {
@@ -396,6 +535,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
         _uiState.update { it.copy(isMuted = newMuted) }
         liveSessionManager.setMuted(newMuted)
         val cur = _uiState.value
+        if (cur.settings.powerButtonTriplePressEnabled) {
+            powerButtonDetector.start()
+        } else {
+            powerButtonDetector.stop()
+        }
         floatingVoicePill.updatePillState(
             enabled = cur.settings.floatingVoicePillEnabled,
             connectionState = cur.connectionState,
@@ -1048,6 +1192,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
             it.copy(connectionState = state, statusBanner = statusText)
         }
         val cur = _uiState.value
+        if (cur.settings.powerButtonTriplePressEnabled) {
+            powerButtonDetector.start()
+        } else {
+            powerButtonDetector.stop()
+        }
         floatingVoicePill.updatePillState(
             enabled = cur.settings.floatingVoicePillEnabled,
             connectionState = state,
@@ -1384,6 +1533,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
     override fun onCleared() {
         super.onCleared()
         pendingAutoHangupJob?.cancel()
+        meetingTimerJob?.cancel()
+        meetingRecorder.stopRecordingSilently()
+        powerButtonDetector.stop()
         floatingVoicePill.hide()
         wakeWordManager.stopStandby()
         liveSessionManager.disconnectImmediate()

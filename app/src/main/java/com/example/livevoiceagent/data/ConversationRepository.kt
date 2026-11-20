@@ -49,7 +49,9 @@ class ConversationRepository(private val context: Context) {
             customBackendApiKey = prefs.getString("customBackendApiKey", "") ?: "",
             appMode = runCatching { AppMode.valueOf(appModeName) }.getOrDefault(defaultAppMode),
             protocol = parsedProtocol,
-            frontendVoiceModel = prefs.getString("frontendVoiceModel", "gpt-live-1") ?: "gpt-live-1",
+            frontendVoiceModel = (prefs.getString("frontendVoiceModel", "gpt-live-1.1") ?: "gpt-live-1.1").let {
+                if (it == "gpt-live-1") "gpt-live-1.1" else it
+            },
             backendBrainModel = prefs.getString("backendBrainModel", "gpt-6-luna") ?: "gpt-6-luna",
             delegationMode = runCatching { DelegationMode.valueOf(delegationName) }.getOrDefault(DelegationMode.RESPONSES),
             voiceName = prefs.getString("voiceName", "marin") ?: "marin",
@@ -74,6 +76,7 @@ class ConversationRepository(private val context: Context) {
             floatingVoicePillEnabled = prefs.getBoolean("floatingVoicePillEnabled", true),
             wakeWordSmartContextOnly = prefs.getBoolean("wakeWordSmartContextOnly", false),
             wakeWordOfflineDtwEnabled = prefs.getBoolean("wakeWordOfflineDtwEnabled", false),
+            powerButtonTriplePressEnabled = prefs.getBoolean("powerButtonTriplePressEnabled", true),
             savedPlaceAliases = prefs.getString("savedPlaceAliases", "") ?: "",
             parkedCarInfoJson = prefs.getString("parkedCarInfoJson", "") ?: "",
             todoItemsJson = prefs.getString("todoItemsJson", "") ?: "",
@@ -137,6 +140,7 @@ class ConversationRepository(private val context: Context) {
             putBoolean("floatingVoicePillEnabled", settings.floatingVoicePillEnabled)
             putBoolean("wakeWordSmartContextOnly", settings.wakeWordSmartContextOnly)
             putBoolean("wakeWordOfflineDtwEnabled", settings.wakeWordOfflineDtwEnabled)
+            putBoolean("powerButtonTriplePressEnabled", settings.powerButtonTriplePressEnabled)
             putString("savedPlaceAliases", settings.savedPlaceAliases)
             putString("parkedCarInfoJson", settings.parkedCarInfoJson)
             putString("todoItemsJson", settings.todoItemsJson)

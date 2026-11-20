@@ -352,6 +352,7 @@ fun MainScreen(
                         onSelectTargetLanguage = { viewModel.setTranslationTargetLanguage(it) },
                         onTriggerTutorQuickAction = { viewModel.triggerTutorQuickAction(it) },
                         onToggleCall = onRequestMicPermissionAndToggleCall,
+                        onToggleMeetingRecording = { viewModel.toggleMeetingRecording() },
                         onToggleMute = { viewModel.toggleMute() },
                         onToggleSpeaker = { viewModel.toggleSpeakerphone() },
                         onSendTypedMessage = { viewModel.sendTypedMessage(it) },

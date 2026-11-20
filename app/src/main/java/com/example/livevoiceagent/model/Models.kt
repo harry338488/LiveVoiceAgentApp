@@ -306,7 +306,7 @@ data class AppSettings(
     val customBackendApiKey: String = "",
     val appMode: AppMode = AppMode.ASSISTANT,
     val protocol: LiveProtocol = LiveProtocol.OPENAI_LIVE,
-    val frontendVoiceModel: String = "gpt-live-1",
+    val frontendVoiceModel: String = "gpt-live-1.1",
     val backendBrainModel: String = "gpt-6-luna",
     val delegationMode: DelegationMode = DelegationMode.RESPONSES,
     val voiceName: String = "marin",
@@ -334,6 +334,8 @@ data class AppSettings(
     val wakeWordSmartContextOnly: Boolean = false,
     /** Enables 100% on-device DTW + voiceprint instant wake-up when acoustic template strongly matches enrolled profile. */
     val wakeWordOfflineDtwEnabled: Boolean = false,
+    /** When true, pressing the hardware power button 3 times within 2.5s immediately opens Catherine and starts talking. */
+    val powerButtonTriplePressEnabled: Boolean = true,
     /** Saved place aliases (one per line, e.g. "家=台北市北投區..." or "公司=..."). */
     val savedPlaceAliases: String = "",
     /** JSON storing the user's last parked car location, floor/pillar note, and timestamp. */
@@ -381,8 +383,8 @@ data class AppSettings(
 3. 輸出結構：請使用繁體中文（專有名詞或日文內容保留原文漢字與假名）回傳清晰、條理分明的重點、數據與操作確認結果，這份輸出將同時提供給前端語音模型口語轉述，並直接保存在使用者的 App 對話筆記中供隨時查閱。"""
 
         val DEFAULT_VOICE_MODELS = listOf(
-            "gpt-live-1",
             "gpt-live-1.1",
+            "gpt-live-1",
             "gpt-live-1-mini",
             "gpt-realtime-2.1",
             "gpt-realtime-translate",

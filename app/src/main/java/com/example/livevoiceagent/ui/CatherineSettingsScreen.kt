@@ -82,6 +82,12 @@ internal fun CatherineSettingsScreen(
             }
 
             SettingsSwitchRow(
+                title = "連按電源鍵三次自動開啟 Catherine",
+                subtitle = "2.5 秒內連按 3 下電源鍵立刻震動並開啟 Catherine 對話（0 麥克風佔用）",
+                checked = s.powerButtonTriplePressEnabled,
+                onCheckedChange = { onUpdateSettings(s.copy(powerButtonTriplePressEnabled = it)) }
+            )
+            SettingsSwitchRow(
                 title = "背景懸浮語音膠囊",
                 subtitle = "背景通話時顯示可拖曳的迷你動態島（字幕與一鍵掛斷）",
                 checked = s.floatingVoicePillEnabled,

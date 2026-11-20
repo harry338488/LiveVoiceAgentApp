@@ -11,8 +11,8 @@ android {
         applicationId = "com.harry338488.livevoiceagent"
         minSdk = 26
         targetSdk = 34
-        versionCode = 25
-        versionName = "2.1.1"
+        versionCode = 26
+        versionName = "2.2.0"
 
         vectorDrawables {
             useSupportLibrary = true

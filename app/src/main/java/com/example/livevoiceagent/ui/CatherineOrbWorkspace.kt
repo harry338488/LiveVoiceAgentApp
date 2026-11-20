@@ -76,6 +76,7 @@ internal fun CatherineOrbWorkspace(
     onSelectTargetLanguage: (String) -> Unit,
     onTriggerTutorQuickAction: (String) -> Unit,
     onToggleCall: () -> Unit,
+    onToggleMeetingRecording: () -> Unit,
     onToggleMute: () -> Unit,
     onToggleSpeaker: () -> Unit,
     onSendTypedMessage: (String) -> Unit,
@@ -181,6 +182,12 @@ internal fun CatherineOrbWorkspace(
                             Spacer(modifier = Modifier.height(28.dp))
 
                             val heroStatus = when {
+                                uiState.isTranscribingMeeting -> "📝 gpt-transcribe 正在轉寫與摘要會議…"
+                                uiState.isMeetingRecording -> {
+                                    val m = uiState.meetingRecordingSeconds / 60
+                                    val sec = uiState.meetingRecordingSeconds % 60
+                                    "🔴 會議錄音中 ${String.format(java.util.Locale.US, "%02d:%02d", m, sec)}（純本機零流量）"
+                                }
                                 isConnecting -> "正在連線至 Catherine…"
                                 isDelegating -> "正在思考與查詢…"
                                 isConnected && uiState.isMuted -> "已靜音 · 點擊左下取消靜音"
@@ -275,31 +282,76 @@ internal fun CatherineOrbWorkspace(
                             }
                         }
 
-                        // Sleek Swipe-Up / Tap Peek Handle for Transcripts
-                        Surface(
-                            shape = RoundedCornerShape(50),
-                            color = Color.White.copy(alpha = 0.06f),
-                            border = BorderStroke(0.5.dp, Color.White.copy(alpha = 0.12f)),
-                            modifier = Modifier
-                                .padding(bottom = 14.dp)
-                                .clickable { showTranscriptView = true }
+                        // Sleek Action Row above dock: In-call Live Camera OR Meeting Recorder + Swipe-Up Transcript Handle
+                        Row(
+                            modifier = Modifier.padding(bottom = 14.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 7.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            if (isConnected) {
+                                Surface(
+                                    shape = RoundedCornerShape(50),
+                                    color = CatherineCyan.copy(alpha = 0.16f),
+                                    border = BorderStroke(0.5.dp, CatherineCyan.copy(alpha = 0.55f)),
+                                    modifier = Modifier.clickable { cameraLauncher.launch(null) }
+                                ) {
+                                    Text(
+                                        text = "👁️ 給 Catherine 看畫面",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = Color(0xFFBAE6FD),
+                                        fontWeight = FontWeight.SemiBold,
+                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp)
+                                    )
+                                }
+                            } else {
+                                Surface(
+                                    shape = RoundedCornerShape(50),
+                                    color = if (uiState.isMeetingRecording) CatherineCrimson.copy(alpha = 0.28f) else Color.White.copy(alpha = 0.06f),
+                                    border = BorderStroke(
+                                        0.5.dp,
+                                        if (uiState.isMeetingRecording) CatherineCrimson else Color.White.copy(alpha = 0.14f)
+                                    ),
+                                    modifier = Modifier.clickable(enabled = !uiState.isTranscribingMeeting) {
+                                        onToggleMeetingRecording()
+                                    }
+                                ) {
+                                    Text(
+                                        text = when {
+                                            uiState.isTranscribingMeeting -> "⏳ 轉寫中…"
+                                            uiState.isMeetingRecording -> "⏹️ 結束會議錄音"
+                                            else -> "🎙️ 會議錄音"
+                                        },
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = if (uiState.isMeetingRecording) Color(0xFFFDA4AF) else Color(0xFFCBD5E1),
+                                        fontWeight = FontWeight.Medium,
+                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp)
+                                    )
+                                }
+                            }
+
+                            Surface(
+                                shape = RoundedCornerShape(50),
+                                color = Color.White.copy(alpha = 0.06f),
+                                border = BorderStroke(0.5.dp, Color.White.copy(alpha = 0.12f)),
+                                modifier = Modifier.clickable { showTranscriptView = true }
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.KeyboardArrowUp,
-                                    contentDescription = "查看對話紀錄",
-                                    tint = Color(0xFF94A3B8),
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Text(
-                                    text = if (messages.isEmpty()) "上滑輸入文字或查看紀錄" else "查看對話紀錄 (${messages.size})",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = Color(0xFFCBD5E1)
-                                )
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.KeyboardArrowUp,
+                                        contentDescription = "查看對話紀錄",
+                                        tint = Color(0xFF94A3B8),
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Text(
+                                        text = if (messages.isEmpty()) "對話紀錄" else "紀錄 (${messages.size})",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = Color(0xFFCBD5E1)
+                                    )
+                                }
                             }
                         }
                     }

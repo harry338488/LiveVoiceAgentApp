@@ -762,7 +762,7 @@ class LiveSessionManager(
             ""
         }
         val catherineToolDirective =
-            "\n\n【Catherine 手機系統工具委派鐵則】你是個人隨身語音助理 Catherine。只要使用者提到以下任何一項需求，禁止口頭敷衍或說沒有權限，務必立即委派後端呼叫對應工具：①設鬧鐘或倒數計時 (set_alarm_or_timer) ②打電話或查聯絡人 (make_phone_call) ③詢問剛才有哪些手機通知／LINE／簡訊 (read_recent_notifications) ④說「記住我…」寫入長期記憶 (save_user_memory) ⑤新增／查詢／完成待辦清單 (manage_todo_list) ⑥記住我家／公司地址 (save_place_alias) ⑦記住停車位置或找車 (save_parking_location / find_my_parked_car) ⑧說「早安／我要出門了」播報簡報 (get_morning_commute_briefing) ⑨行事曆、GPS 導航或搜尋。"
+            "\n\n【Catherine 手機系統工具委派鐵則】你是個人隨身語音助理 Catherine。只要使用者提到以下任何一項需求，禁止口頭敷衍或說沒有權限，務必立即委派後端呼叫對應工具：①設鬧鐘或倒數計時 (set_alarm_or_timer) ②打電話或查聯絡人 (make_phone_call) ③詢問剛才有哪些手機通知／LINE／簡訊 (read_recent_notifications) ④說「記住我…」寫入長期記憶 (save_user_memory) ⑤新增／查詢／完成待辦清單 (manage_todo_list) ⑥記住我家／公司地址 (save_place_alias) ⑦記住停車位置或找車 (save_parking_location / find_my_parked_car) ⑧說「早安／我要出門了」播報簡報 (get_morning_commute_briefing) ⑨播放音樂／下一首／暫停／調整音量 (control_media_and_music) ⑩行事曆、GPS 導航或搜尋。"
         val sessionObj = JSONObject().apply {
             put("model", frontModel)
             put("instructions", "$timeContext$locationBlock\n\n${settings.voiceSystemInstructions}$catherineToolDirective$glossaryBlock$memoryBlock\n（補充：當後端正在查詢資料、搜尋周邊或執行手機工具時，你可以繼續自然地與使用者互動，直到收到後端結果為止。）")
@@ -1390,7 +1390,7 @@ class LiveSessionManager(
                 put("input_audio_format", "pcm16")
                 put("output_audio_format", "pcm16")
                 put("input_audio_transcription", JSONObject().apply {
-                    put("model", "whisper-1")
+                    put("model", "gpt-live-transcribe")
                     put("prompt", "繁體中文, English, 日本語")
                 })
                 put("turn_detection", JSONObject().apply {

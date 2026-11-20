@@ -713,7 +713,7 @@ class WakeWordManager(
     ): String {
         val wavBytes = encodePcmToWavBytes(pcmSamples, sampleRate)
 
-        val modelsToTry = listOf("gpt-4o-mini-transcribe", "whisper-1")
+        val modelsToTry = listOf("gpt-transcribe", "gpt-4o-mini-transcribe", "whisper-1")
         for (modelName in modelsToTry) {
             val text = runCatching {
                 val body = MultipartBody.Builder()
