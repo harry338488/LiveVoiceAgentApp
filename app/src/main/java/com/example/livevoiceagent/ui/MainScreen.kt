@@ -93,7 +93,7 @@ private val EmeraldAccent = Color(0xFF10B981)
 private val AmberTutorAccent = Color(0xFFF59E0B)
 private val RoseDanger = Color(0xFFF43F5E)
 
-private data class MapPreviewData(
+internal data class MapPreviewData(
     val lat: Double,
     val lon: Double,
     val userLat: Double?,
