@@ -344,10 +344,50 @@ internal fun CatherineSettingsScreen(
             )
             SettingsSwitchRow(
                 title = "Linkup 即時網路搜尋",
-                subtitle = "查詢即時新聞、天氣與網路資料",
+                subtitle = "查詢即時新聞、天氣與網路資料（支援極速 fast / flash 模式）",
                 checked = s.linkupSearchEnabled,
                 onCheckedChange = { onUpdateSettings(s.copy(linkupSearchEnabled = it)) }
             )
+            if (s.linkupSearchEnabled) {
+                Text(
+                    text = "⚡ Linkup 搜尋速度模式（語音建議 fast 或 flash）",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFF94A3B8)
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    listOf(
+                        "flash" to "⚡flash",
+                        "fast" to "🚀fast",
+                        "standard" to "standard",
+                        "deep" to "deep"
+                    ).forEach { (depthKey, label) ->
+                        val selected = s.linkupSearchDepth == depthKey
+                        Surface(
+                            shape = RoundedCornerShape(50),
+                            color = if (selected) SettingsAccentCyan.copy(alpha = 0.22f) else Color.White.copy(alpha = 0.05f),
+                            border = BorderStroke(
+                                1.dp,
+                                if (selected) SettingsAccentCyan else Color.White.copy(alpha = 0.12f)
+                            ),
+                            modifier = Modifier
+                                .weight(1f)
+                                .clickable { onUpdateSettings(s.copy(linkupSearchDepth = depthKey)) }
+                        ) {
+                            Text(
+                                text = label,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                color = if (selected) Color.White else Color(0xFF94A3B8),
+                                modifier = Modifier.padding(vertical = 7.dp),
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            )
+                        }
+                    }
+                }
+            }
 
             OutlinedButton(
                 onClick = {

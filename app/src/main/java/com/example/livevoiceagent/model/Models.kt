@@ -311,7 +311,7 @@ data class AppSettings(
     val delegationMode: DelegationMode = DelegationMode.RESPONSES,
     val voiceName: String = "marin",
     val linkupSearchEnabled: Boolean = true,
-    val linkupSearchDepth: String = "standard",
+    val linkupSearchDepth: String = "fast",
     val openAiNativeSearchEnabled: Boolean = false,
     val calendarToolsEnabled: Boolean = true,
     val locationToolsEnabled: Boolean = true,

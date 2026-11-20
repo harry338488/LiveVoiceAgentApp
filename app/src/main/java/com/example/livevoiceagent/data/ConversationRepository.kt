@@ -54,7 +54,7 @@ class ConversationRepository(private val context: Context) {
             delegationMode = runCatching { DelegationMode.valueOf(delegationName) }.getOrDefault(DelegationMode.RESPONSES),
             voiceName = prefs.getString("voiceName", "marin") ?: "marin",
             linkupSearchEnabled = prefs.getBoolean("linkupSearchEnabled", true),
-            linkupSearchDepth = prefs.getString("linkupSearchDepth", "standard") ?: "standard",
+            linkupSearchDepth = prefs.getString("linkupSearchDepth", "fast") ?: "fast",
             openAiNativeSearchEnabled = prefs.getBoolean("openAiNativeSearchEnabled", false),
             calendarToolsEnabled = prefs.getBoolean("calendarToolsEnabled", true),
             locationToolsEnabled = prefs.getBoolean("locationToolsEnabled", true),

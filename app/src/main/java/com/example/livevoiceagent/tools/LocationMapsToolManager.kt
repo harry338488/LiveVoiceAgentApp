@@ -1441,12 +1441,12 @@ class LocationMapsToolManager(
         val city = snap?.cityOrDistrict?.ifBlank { "台灣" } ?: "台灣"
         val prefs = context.getSharedPreferences("live_voice_agent_prefs", Context.MODE_PRIVATE)
 
-        // 1. Weather via Linkup if available
+        // 1. Weather via Linkup fast mode (~1s) if available
         val weatherSummary = if (linkupApiKey.isNotBlank()) {
             linkupClient.search(
                 apiKey = linkupApiKey,
                 query = "$city 今天天氣 氣溫 降雨機率",
-                depth = "standard"
+                depth = "fast"
             ).getOrNull()?.answer?.take(220) ?: "暫無即時天氣資料"
         } else {
             "未設定 Linkup API Key，略過天氣查詢"
