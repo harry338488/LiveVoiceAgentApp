@@ -67,6 +67,8 @@ class LiveSessionManager(
 
     @Volatile
     private var isClosing: Boolean = false
+    @Volatile
+    private var autoReconnectAttempted: Boolean = false
 
     @Volatile
     private var isClientDelegationSession: Boolean = true
@@ -432,6 +434,7 @@ class LiveSessionManager(
         activeNotebookEntries = notebookEntries
         sessionStarted = false
         isClosing = false
+        autoReconnectAttempted = false
         isWakeWordTriggeredSession = isWakeWordSession
         hasFirstUserUtteranceArrived = false
         lastActivityWallMs = System.currentTimeMillis()
@@ -589,6 +592,29 @@ class LiveSessionManager(
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                val httpCode = response?.code ?: 0
+                val isAuthOrClientError = httpCode in 400..499
+                if (!isClosing && sessionStarted && !autoReconnectAttempted && !isAuthOrClientError) {
+                    autoReconnectAttempted = true
+                    listener.onConnectionStateChanged(
+                        ConnectionState.CONNECTING,
+                        "📡 偵測到網路切換（Wi-Fi ⇄ 4G/5G），正在自動重新連線至 Catherine..."
+                    )
+                    scope.launch {
+                        delay(900L)
+                        if (!isClosing) {
+                            connect(
+                                settings = settings,
+                                priorMessages = conversationSnapshotProvider(),
+                                notebookEntries = activeNotebookEntries,
+                                conversationSnapshotProvider = conversationSnapshotProvider,
+                                useSpeakerphone = useSpeakerphone,
+                                isWakeWordSession = false
+                            )
+                        }
+                    }
+                    return
+                }
                 val errBody = runCatching { response?.body?.string() }.getOrNull().orEmpty()
                 val msg = "連線中斷: ${t.message ?: "未知錯誤"} ${if (errBody.isNotBlank()) "($errBody)" else ""}"
                 listener.onError(msg.trim())
@@ -735,9 +761,11 @@ class LiveSessionManager(
         } else {
             ""
         }
+        val catherineToolDirective =
+            "\n\n【Catherine 手機系統工具委派鐵則】你是個人隨身語音助理 Catherine。只要使用者提到以下任何一項需求，禁止口頭敷衍或說沒有權限，務必立即委派後端呼叫對應工具：①設鬧鐘或倒數計時 (set_alarm_or_timer) ②打電話或查聯絡人 (make_phone_call) ③詢問剛才有哪些手機通知／LINE／簡訊 (read_recent_notifications) ④說「記住我…」寫入長期記憶 (save_user_memory) ⑤新增／查詢／完成待辦清單 (manage_todo_list) ⑥記住我家／公司地址 (save_place_alias) ⑦記住停車位置或找車 (save_parking_location / find_my_parked_car) ⑧說「早安／我要出門了」播報簡報 (get_morning_commute_briefing) ⑨行事曆、GPS 導航或搜尋。"
         val sessionObj = JSONObject().apply {
             put("model", frontModel)
-            put("instructions", "$timeContext$locationBlock\n\n${settings.voiceSystemInstructions}$glossaryBlock$memoryBlock\n（補充：當後端正在查詢資料、搜尋周邊或規劃導航時，你可以繼續自然地與使用者閒聊互動，直到收到後端結果為止。）")
+            put("instructions", "$timeContext$locationBlock\n\n${settings.voiceSystemInstructions}$catherineToolDirective$glossaryBlock$memoryBlock\n（補充：當後端正在查詢資料、搜尋周邊或執行手機工具時，你可以繼續自然地與使用者互動，直到收到後端結果為止。）")
 
             val seedArray = buildSeedInputArray(priorMessages)
             if (seedArray.length() > 0) {
@@ -768,7 +796,7 @@ class LiveSessionManager(
                     put("type", "responses")
                     put("responses", JSONObject().apply {
                         put("model", backModel)
-                        put("instructions", "$timeContext\n\n${settings.backendSystemInstructions}$glossaryBlock$memoryBlock")
+                        put("instructions", "$timeContext$locationBlock\n\n${settings.backendSystemInstructions}$catherineToolDirective$glossaryBlock$memoryBlock")
                         if (toolsArr.length() > 0) {
                             put("tools", toolsArr)
                             put("tool_choice", "auto")

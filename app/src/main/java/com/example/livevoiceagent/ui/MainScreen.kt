@@ -334,7 +334,7 @@ fun MainScreen(
                     .padding(innerPadding)
             ) {
                 if (showFullSettingsScreen) {
-                    SettingsAndModelFetchTab(
+                    CatherineSettingsScreen(
                         uiState = uiState,
                         onUpdateSettings = { viewModel.updateSettings(it) },
                         onFetchModels = { viewModel.fetchModelsFromApis() },
@@ -4666,7 +4666,7 @@ private fun WakeWordAndVoiceprintDialog(
                             onUpdateSettings(
                                 settings.copy(
                                     wakeWordEnabled = !settings.wakeWordEnabled,
-                                    wakeWordPhrase = wakePhraseText.trim().ifBlank { "hey Luna 我需要你" }
+                                    wakeWordPhrase = wakePhraseText.trim().ifBlank { "hey Catherine" }
                                 )
                             )
                         }
@@ -4694,7 +4694,7 @@ private fun WakeWordAndVoiceprintDialog(
                                 onUpdateSettings(
                                     settings.copy(
                                         wakeWordEnabled = enabled,
-                                        wakeWordPhrase = wakePhraseText.trim().ifBlank { "hey Luna 我需要你" }
+                                        wakeWordPhrase = wakePhraseText.trim().ifBlank { "hey Catherine" }
                                     )
                                 )
                             }
@@ -4727,7 +4727,7 @@ private fun WakeWordAndVoiceprintDialog(
                             color = if (canDrawOverlays) Color(0xFFA7F3D0) else Color(0xFFFDE68A)
                         )
                         Text(
-                            text = "Android 10～14+ 系統限制背景服務直接跳轉其他 App。開啟此權限後，即使您未打開本 App，直接喊「hey Luna 我需要你」要求導航時，也能 100% 零點擊自動拉起 Google Maps 開始導航。",
+                            text = "Android 10～14+ 系統限制背景服務直接跳轉其他 App。開啟此權限後，即使您未打開本 App，直接喊「hey Catherine」要求導航時，也能 100% 零點擊自動拉起 Google Maps 開始導航。",
                             style = MaterialTheme.typography.labelSmall,
                             color = Color(0xFFCBD5E1)
                         )
@@ -4777,7 +4777,7 @@ private fun WakeWordAndVoiceprintDialog(
                                 )
                                 Text(
                                     if (settings.wakeWordBringAppToFront) "開啟：喊喚醒詞會切換到本 App 畫面"
-                                    else "關閉（建議）：Luna 在背景直接對話，不打斷您正在使用的 App",
+                                    else "關閉（建議）：Catherine 在背景直接對話，不打斷您正在使用的 App",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = Color(0xFFCBD5E1)
                                 )
@@ -4797,7 +4797,7 @@ private fun WakeWordAndVoiceprintDialog(
                                     color = Color.White
                                 )
                                 Text(
-                                    "可關閉上方常駐喚醒（不佔麥克風，Hey Google 恢復正常），改說「Hey Google，開啟 Live Voice Brain」即自動進入對話。長按 App 圖示也有「和 Luna 對話」捷徑。",
+                                    "可關閉上方常駐喚醒（不佔麥克風，Hey Google 恢復正常），改說「Hey Google，開啟 Catherine」即自動進入對話。長按 App 圖示也有「和 Catherine 對話」捷徑。",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = Color(0xFFCBD5E1)
                                 )
@@ -4906,8 +4906,8 @@ private fun WakeWordAndVoiceprintDialog(
                         }
 
                         Text(
-                            if (notifAccessGranted) "✅ 已授權「通知讀取權限」：可隨時問 Luna『剛剛 LINE 有誰傳訊息給我？』"
-                            else "📬 若想讓 Luna 幫您免手朗讀 LINE / 簡訊最新通知，可開啟通知讀取權限：",
+                            if (notifAccessGranted) "✅ 已授權「通知讀取權限」：可隨時問 Catherine『剛剛 LINE 有誰傳訊息給我？』"
+                            else "📬 若想讓 Catherine 幫您免手朗讀 LINE / 簡訊最新通知，可開啟通知讀取權限：",
                             style = MaterialTheme.typography.labelSmall,
                             color = if (notifAccessGranted) Color(0xFFA7F3D0) else Color(0xFFCBD5E1)
                         )
