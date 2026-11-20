@@ -318,7 +318,7 @@ data class AppSettings(
     val googleMapsApiKey: String = "",
     val autoEndCallOnNavigation: Boolean = true,
     val wakeWordEnabled: Boolean = false,
-    val wakeWordPhrase: String = "hey Luna 我需要你",
+    val wakeWordPhrase: String = "hey Catherine",
     val wakeWordVoiceprintEnabled: Boolean = true,
     val wakeWordVoiceprintData: String = "",
     val wakeWordFirstUtteranceTimeoutSec: Int = 8,

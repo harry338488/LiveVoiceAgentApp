@@ -61,7 +61,9 @@ class ConversationRepository(private val context: Context) {
             googleMapsApiKey = prefs.getString("googleMapsApiKey", "") ?: "",
             autoEndCallOnNavigation = prefs.getBoolean("autoEndCallOnNavigation", true),
             wakeWordEnabled = prefs.getBoolean("wakeWordEnabled", false),
-            wakeWordPhrase = prefs.getString("wakeWordPhrase", "hey Luna 我需要你") ?: "hey Luna 我需要你",
+            wakeWordPhrase = (prefs.getString("wakeWordPhrase", "hey Catherine") ?: "hey Catherine").let {
+                if (it.equals("hey Luna 我需要你", ignoreCase = true) || it.isBlank()) "hey Catherine" else it
+            },
             wakeWordVoiceprintEnabled = prefs.getBoolean("wakeWordVoiceprintEnabled", true),
             wakeWordVoiceprintData = prefs.getString("wakeWordVoiceprintData", "") ?: "",
             wakeWordFirstUtteranceTimeoutSec = prefs.getInt("wakeWordFirstUtteranceTimeoutSec", 8),
@@ -124,7 +126,7 @@ class ConversationRepository(private val context: Context) {
             putString("googleMapsApiKey", settings.googleMapsApiKey.trim())
             putBoolean("autoEndCallOnNavigation", settings.autoEndCallOnNavigation)
             putBoolean("wakeWordEnabled", settings.wakeWordEnabled)
-            putString("wakeWordPhrase", settings.wakeWordPhrase.trim().ifBlank { "hey Luna 我需要你" })
+            putString("wakeWordPhrase", settings.wakeWordPhrase.trim().ifBlank { "hey Catherine" })
             putBoolean("wakeWordVoiceprintEnabled", settings.wakeWordVoiceprintEnabled)
             putString("wakeWordVoiceprintData", settings.wakeWordVoiceprintData)
             putInt("wakeWordFirstUtteranceTimeoutSec", settings.wakeWordFirstUtteranceTimeoutSec.coerceIn(5, 30))

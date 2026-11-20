@@ -212,148 +212,117 @@ fun MainScreen(
         }
     ) {
         Scaffold(
-            containerColor = Color.Transparent,
+            containerColor = Color(0xFF05070B),
             topBar = {
                 Surface(
-                    color = Color(0xFF0B111E).copy(alpha = 0.95f),
+                    color = Color(0xFF05070B),
                     tonalElevation = 0.dp
                 ) {
-                    Column {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 8.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 10.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Left: Drawer Menu OR Back from Settings
+                        IconButton(
+                            onClick = {
+                                if (showFullSettingsScreen) {
+                                    showFullSettingsScreen = false
+                                } else {
+                                    scope.launch { drawerState.open() }
+                                }
+                            }
                         ) {
-                            // Left: Drawer Menu Button OR Back from Settings
-                            IconButton(
-                                onClick = {
-                                    if (showFullSettingsScreen) {
-                                        showFullSettingsScreen = false
-                                    } else {
-                                        scope.launch { drawerState.open() }
-                                    }
-                                }
-                            ) {
-                                Icon(
-                                    imageVector = if (showFullSettingsScreen) Icons.Default.ArrowBack else Icons.Default.Menu,
-                                    contentDescription = if (showFullSettingsScreen) "返回對話" else "開啟側邊選單",
-                                    tint = Color(0xFFE2E8F0)
-                                )
-                            }
+                            Icon(
+                                imageVector = if (showFullSettingsScreen) Icons.Default.ArrowBack else Icons.Default.Menu,
+                                contentDescription = if (showFullSettingsScreen) "返回" else "選單",
+                                tint = Color(0xFFE2E8F0)
+                            )
+                        }
 
-                            Spacer(modifier = Modifier.width(4.dp))
-
-                            // Center: RikkaHub-style Clean Title & Live Status Subtitle
-                            Column(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .clickable(enabled = !showFullSettingsScreen) {
-                                        showModeConfigBottomSheet = true
-                                    }
-                            ) {
+                        // Center: Clean Catherine Wordmark + Mode Pill (or Settings Title)
+                        Box(
+                            modifier = Modifier.weight(1f),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (showFullSettingsScreen) {
                                 Text(
-                                    text = if (showFullSettingsScreen) {
-                                        "⚙️ 模型、API 金鑰與工具設定"
-                                    } else {
-                                        uiState.currentSession.title
-                                    },
+                                    text = "設定",
                                     style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color(0xFFF8FAFC),
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color(0xFFF8FAFC)
                                 )
-                                Spacer(modifier = Modifier.height(1.dp))
-                                val subtitleText = when {
-                                    showFullSettingsScreen -> "管理 OpenAI / xAI / Linkup 金鑰、定位導航與系統 Prompt"
-                                    isConnected -> uiState.statusBanner
-                                    isTutorMode -> {
-                                        val langShort = AppSettings.tutorLanguageLabel(uiState.settings.tutorTargetLanguage).substringBefore(" (")
-                                        "🎓 外語陪練 · $langShort (${uiState.settings.tutorLevel.shortLabel})"
-                                    }
-                                    isTranslationMode -> {
-                                        "🌐 同步口譯 · 自動偵測 ➔ ${AppSettings.languageLabel(uiState.settings.translationTargetLanguage).substringBefore(" (")}"
-                                    }
-                                    else -> {
-                                        "🎙️ ${uiState.settings.frontendVoiceModel} ⇄ ${uiState.settings.backendBrainModel}"
-                                    }
-                                }
-                                Text(
-                                    text = subtitleText,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = when {
-                                        isConnected && uiState.connectionState == ConnectionState.DELEGATING -> VioletAccent
-                                        isTutorMode -> AmberTutorAccent
-                                        isTranslationMode -> EmeraldAccent
-                                        else -> CyanAccent
-                                    },
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-
-                            // Call Timer Pill if active
-                            if (uiState.voiceUsageSeconds > 0 && !showFullSettingsScreen) {
-                                val mins = uiState.voiceUsageSeconds / 60
-                                val secs = uiState.voiceUsageSeconds % 60
+                            } else {
                                 Surface(
                                     shape = RoundedCornerShape(50),
-                                    color = EmeraldAccent.copy(alpha = 0.16f),
-                                    border = BorderStroke(0.5.dp, EmeraldAccent.copy(alpha = 0.5f)),
-                                    modifier = Modifier.padding(end = 4.dp)
+                                    color = Color.White.copy(alpha = 0.06f),
+                                    border = BorderStroke(0.5.dp, Color.White.copy(alpha = 0.12f)),
+                                    modifier = Modifier.clickable { showModeConfigBottomSheet = true }
                                 ) {
-                                    Text(
-                                        text = String.format(Locale.US, "%02d:%02d", mins, secs),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontFamily = FontFamily.Monospace,
-                                        fontWeight = FontWeight.Bold,
-                                        color = EmeraldAccent,
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                                    )
-                                }
-                            }
-
-                            if (!showFullSettingsScreen) {
-                                // Mode Quick Config BottomSheet Trigger
-                                IconButton(onClick = { showModeConfigBottomSheet = true }) {
-                                    Icon(
-                                        Icons.Default.Tune,
-                                        contentDescription = "當前模式與工具快速設定",
-                                        tint = when {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Text(
+                                            text = "Catherine",
+                                            style = MaterialTheme.typography.titleSmall,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = Color.White
+                                        )
+                                        val modeTag = when {
+                                            isTutorMode -> "家教"
+                                            isTranslationMode -> "口譯"
+                                            else -> "助理"
+                                        }
+                                        val modeColor = when {
                                             isTutorMode -> AmberTutorAccent
                                             isTranslationMode -> EmeraldAccent
                                             else -> CyanAccent
                                         }
-                                    )
-                                }
-
-                                // Copy Markdown Button
-                                IconButton(
-                                    onClick = {
-                                        val md = viewModel.exportSessionMarkdown(uiState.currentSession)
-                                        copyToClipboard(context, "Conversation Markdown", md)
-                                        Toast.makeText(context, "已複製當前對話完整 Markdown 筆記", Toast.LENGTH_SHORT).show()
+                                        Text(
+                                            text = "· $modeTag",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = modeColor,
+                                            fontWeight = FontWeight.Medium
+                                        )
+                                        if (uiState.voiceUsageSeconds > 0) {
+                                            val mins = uiState.voiceUsageSeconds / 60
+                                            val secs = uiState.voiceUsageSeconds % 60
+                                            Text(
+                                                text = String.format(Locale.US, "%02d:%02d", mins, secs),
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontFamily = FontFamily.Monospace,
+                                                color = EmeraldAccent
+                                            )
+                                        }
                                     }
-                                ) {
-                                    Icon(
-                                        Icons.Default.ContentCopy,
-                                        contentDescription = "複製完整對話筆記",
-                                        tint = Color(0xFFCBD5E1)
-                                    )
-                                }
-
-                                // New Chat Button
-                                IconButton(onClick = { viewModel.startNewConversationSession() }) {
-                                    Icon(
-                                        Icons.Default.AddComment,
-                                        contentDescription = "開啟新對話",
-                                        tint = CyanAccent
-                                    )
                                 }
                             }
                         }
-                        HorizontalDivider(color = Color.White.copy(alpha = 0.06f))
+
+                        // Right: Wake Word Quick Toggle & Settings
+                        if (!showFullSettingsScreen) {
+                            IconButton(onClick = { showWakeWordDialog = true }) {
+                                Icon(
+                                    imageVector = Icons.Default.RecordVoiceOver,
+                                    contentDescription = "語音喚醒設定",
+                                    tint = if (uiState.isWakeWordStandbyActive) EmeraldAccent else Color(0xFF94A3B8),
+                                    modifier = Modifier.size(21.dp)
+                                )
+                            }
+                            IconButton(onClick = { showFullSettingsScreen = true }) {
+                                Icon(
+                                    imageVector = Icons.Default.Settings,
+                                    contentDescription = "設定",
+                                    tint = Color(0xFFCBD5E1),
+                                    modifier = Modifier.size(21.dp)
+                                )
+                            }
+                        } else {
+                            Spacer(modifier = Modifier.width(48.dp))
+                        }
                     }
                 }
             }
@@ -361,7 +330,7 @@ fun MainScreen(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(DeepSpaceBgBrush)
+                    .background(Color(0xFF05070B))
                     .padding(innerPadding)
             ) {
                 if (showFullSettingsScreen) {
@@ -373,7 +342,7 @@ fun MainScreen(
                         onOpenWakeWordDialog = { showWakeWordDialog = true }
                     )
                 } else {
-                    LiveConversationTab(
+                    CatherineOrbWorkspace(
                         uiState = uiState,
                         currentMode = currentMode,
                         onOpenModeConfigSheet = { showModeConfigBottomSheet = true },
@@ -381,8 +350,6 @@ fun MainScreen(
                         onOpenWakeWordDialog = { showWakeWordDialog = true },
                         onOpenMapPreview = { preview -> activeMapPreviewData = preview },
                         onSelectTargetLanguage = { viewModel.setTranslationTargetLanguage(it) },
-                        onSelectSecondaryLanguage = { viewModel.setTranslationSecondaryLanguage(it) },
-                        onUpdateSettings = { viewModel.updateSettings(it) },
                         onTriggerTutorQuickAction = { viewModel.triggerTutorQuickAction(it) },
                         onToggleCall = onRequestMicPermissionAndToggleCall,
                         onToggleMute = { viewModel.toggleMute() },
@@ -2993,7 +2960,7 @@ private fun VisionInputDialog(
 }
 
 @Composable
-private fun ChatMessageItem(
+internal fun ChatMessageItem(
     message: ChatMessage,
     isSavedInNotebook: Boolean,
     onCopyText: (String) -> Unit,
@@ -4619,7 +4586,7 @@ private fun LongTermMemoryDialog(
     )
 }
 
-private fun copyToClipboard(context: Context, label: String, text: String) {
+internal fun copyToClipboard(context: Context, label: String, text: String) {
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     val clip = ClipData.newPlainText(label, text)
     clipboard.setPrimaryClip(clip)
@@ -4636,7 +4603,7 @@ private fun WakeWordAndVoiceprintDialog(
     val context = LocalContext.current
     val settings = uiState.settings
     var wakePhraseText by remember(settings.wakeWordPhrase) {
-        mutableStateOf(settings.wakeWordPhrase.ifBlank { "hey Luna 我需要你" })
+        mutableStateOf(settings.wakeWordPhrase.ifBlank { "hey Catherine" })
     }
     var canDrawOverlays by remember {
         mutableStateOf(
@@ -4963,22 +4930,22 @@ private fun WakeWordAndVoiceprintDialog(
                     }
                 }
 
-                // 2. Wake Phrase Input (Default: "hey Luna 我需要你")
+                // 2. Wake Phrase Input (Default: "hey Catherine")
                 OutlinedTextField(
                     value = wakePhraseText,
                     onValueChange = {
                         wakePhraseText = it
-                        onUpdateSettings(settings.copy(wakeWordPhrase = it.trim().ifBlank { "hey Luna 我需要你" }))
+                        onUpdateSettings(settings.copy(wakeWordPhrase = it.trim().ifBlank { "hey Catherine" }))
                     },
-                    label = { Text("🗣️ 專屬喚醒詞 (預設：hey Luna 我需要你)") },
-                    placeholder = { Text("hey Luna 我需要你") },
+                    label = { Text("🗣️ 專屬喚醒詞 (預設：hey Catherine)") },
+                    placeholder = { Text("hey Catherine") },
                     singleLine = true,
                     trailingIcon = {
-                        if (wakePhraseText != "hey Luna 我需要你") {
+                        if (wakePhraseText != "hey Catherine") {
                             TextButton(
                                 onClick = {
-                                    wakePhraseText = "hey Luna 我需要你"
-                                    onUpdateSettings(settings.copy(wakeWordPhrase = "hey Luna 我需要你"))
+                                    wakePhraseText = "hey Catherine"
+                                    onUpdateSettings(settings.copy(wakeWordPhrase = "hey Catherine"))
                                 }
                             ) {
                                 Text("預設", color = CyanAccent, style = MaterialTheme.typography.labelSmall)

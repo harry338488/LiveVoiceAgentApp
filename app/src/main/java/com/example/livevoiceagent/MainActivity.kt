@@ -55,8 +55,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        window.statusBarColor = Color(0xFF080C14).toArgb()
-        window.navigationBarColor = Color(0xFF0B1120).toArgb()
+        window.statusBarColor = Color(0xFF05070B).toArgb()
+        window.navigationBarColor = Color(0xFF05070B).toArgb()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)
             setTurnScreenOn(true)
@@ -167,12 +167,14 @@ class MainActivity : ComponentActivity() {
                 }
                 val caption = intent.getStringExtra(Intent.EXTRA_TEXT).orEmpty()
                 if (imgUri != null) {
-                    runCatching {
-                        contentResolver.openInputStream(imgUri)?.use { input ->
-                            android.graphics.BitmapFactory.decodeStream(input)
-                        }?.let { bmp ->
-                            mainViewModel.sendImageMessage(bmp, caption)
-                            Toast.makeText(this, "📲 已收到分享圖片，Luna 正在為您解析！", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, "📲 已收到分享圖片，Catherine 正在為您解析！", Toast.LENGTH_SHORT).show()
+                    lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                        runCatching {
+                            contentResolver.openInputStream(imgUri)?.use { input ->
+                                android.graphics.BitmapFactory.decodeStream(input)
+                            }?.let { bmp ->
+                                mainViewModel.sendImageMessage(bmp, caption)
+                            }
                         }
                     }
                 }
@@ -181,7 +183,7 @@ class MainActivity : ComponentActivity() {
                 val sharedText = intent.getStringExtra(Intent.EXTRA_TEXT).orEmpty()
                 if (sharedText.isNotBlank()) {
                     mainViewModel.handleSharedTextFromExternalApp(sharedText)
-                    Toast.makeText(this, "📲 已收到分享內容，Luna 正在整理重點！", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, "📲 已收到分享內容，Catherine 正在整理重點！", Toast.LENGTH_SHORT).show()
                 }
                 return
             }

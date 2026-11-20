@@ -45,7 +45,7 @@ class WakeWordForegroundService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         acquireCpuWakeLock()
-        val wakePhrase = intent?.getStringExtra("wake_phrase")?.takeIf { it.isNotBlank() } ?: "hey Luna 我需要你"
+        val wakePhrase = intent?.getStringExtra("wake_phrase")?.takeIf { it.isNotBlank() } ?: "hey Catherine"
         val notification = buildNotification(wakePhrase)
         runCatching {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {

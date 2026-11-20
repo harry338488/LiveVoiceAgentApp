@@ -132,7 +132,7 @@ class FloatingVoicePillManager(
                 setTypeface(typeface, Typeface.BOLD)
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
-                text = "🎙️ Luna 通話中"
+                text = "🎙️ Catherine 通話中"
             }
 
             val subTv = TextView(context).apply {
@@ -288,9 +288,9 @@ class FloatingVoicePillManager(
         }
 
         val stateLabel = when (state) {
-            ConnectionState.CONNECTING -> "⏳ Luna 連線中..."
-            ConnectionState.DELEGATING -> "🧠 Luna 後端查詢中 · $bars"
-            ConnectionState.LIVE -> "🎙️ Luna 背景通話中 · $bars"
+            ConnectionState.CONNECTING -> "⏳ Catherine 連線中..."
+            ConnectionState.DELEGATING -> "🧠 Catherine 查詢中 · $bars"
+            ConnectionState.LIVE -> "🎙️ Catherine 背景通話中 · $bars"
             ConnectionState.CLOSING -> "📴 正在結束通話..."
             ConnectionState.DISCONNECTED -> "已結束"
         }

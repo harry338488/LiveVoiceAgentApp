@@ -93,7 +93,7 @@
             android:name=".audio.LunaQuickSettingsTileService"
             android:exported="true"
             android:icon="@android:drawable/ic_btn_speak_now"
-            android:label="Luna 語音對話"
+            android:label="Catherine 語音"
             android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
             <intent-filter>
                 <action android:name="android.service.quicksettings.action.QS_TILE" />
@@ -103,7 +103,7 @@
         <service
             android:name=".tools.LunaNotificationListenerService"
             android:exported="true"
-            android:label="Luna 通知朗讀助手"
+            android:label="Catherine 通知朗讀助手"
             android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
             <intent-filter>
                 <action android:name="android.service.notification.NotificationListenerService" />

@@ -284,7 +284,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
             _uiState.update { it.copy(errorToast = "請先結束目前的語音通話，再錄製本人聲紋樣本") }
             return
         }
-        val phrase = _uiState.value.settings.wakeWordPhrase.ifBlank { "hey Luna 我需要你" }
+        val phrase = _uiState.value.settings.wakeWordPhrase.ifBlank { "hey Catherine" }
         _uiState.update {
             it.copy(
                 isEnrollingVoiceprint = true,
@@ -1053,7 +1053,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
             connectionState = state,
             isMuted = cur.isMuted,
             micLevel = cur.micLevel,
-            latestTranscriptSnippet = if (state == ConnectionState.CONNECTING) "正在連線至 Luna..." else null
+            latestTranscriptSnippet = if (state == ConnectionState.CONNECTING) "正在連線至 Catherine..." else null
         )
         if (state == ConnectionState.DISCONNECTED) {
             triggerAiTitleGenerationIfNeeded()

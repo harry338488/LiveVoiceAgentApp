@@ -17,7 +17,7 @@ class LunaQuickSettingsTileService : TileService() {
         super.onStartListening()
         qsTile?.apply {
             state = Tile.STATE_ACTIVE
-            label = "Luna 語音對話"
+            label = "Catherine 語音"
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 subtitle = "點一下立即開講"
             }

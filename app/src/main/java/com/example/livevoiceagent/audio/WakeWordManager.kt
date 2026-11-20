@@ -130,7 +130,7 @@ class WakeWordManager(
     @Volatile
     private var openAiApiKey: String = ""
     @Volatile
-    private var targetWakePhrase: String = "hey Luna 我需要你"
+    private var targetWakePhrase: String = "hey Catherine"
     @Volatile
     private var voiceprintEnabled: Boolean = true
     @Volatile
@@ -299,7 +299,7 @@ class WakeWordManager(
         voiceprintDataJson: String,
         isCallCurrentlyActive: Boolean
     ) {
-        targetWakePhrase = wakePhrase.trim().ifBlank { "hey Luna 我需要你" }
+        targetWakePhrase = wakePhrase.trim().ifBlank { "hey Catherine" }
         voiceprintEnabled = useVoiceprint
         enrolledProfile = VoiceprintProfile.fromJsonString(voiceprintDataJson)
         isPausedForActiveCall = isCallCurrentlyActive
@@ -1161,6 +1161,10 @@ class WakeWordManager(
 
             if (spokenNorm.contains(targetNorm)) return true
 
+            if (targetNorm.contains("catherine") && spokenNorm.contains("catherine")) {
+                return true
+            }
+
             val targetHasLuna = targetNorm.contains("luna")
             val targetHasNeedYou = targetNorm.contains("需要你")
             if (targetHasLuna && targetHasNeedYou) {
@@ -1174,6 +1178,15 @@ class WakeWordManager(
         private fun normalizeForWakeComparison(input: String): String {
             var s = input.lowercase(Locale.ROOT)
                 .replace(Regex("[\\s,，.。!！?？、~～\"'「」『』（）()\\-_]"), "")
+
+            // Map common English/Chinese STT homophones of "Catherine" -> "catherine"
+            val catherineHomophones = listOf(
+                "katherine", "kathryn", "cathryn", "catharine", "katheryn", "katarina", "catherin",
+                "凱瑟琳", "凱薩琳", "凱斯琳", "凱西琳", "凱特琳", "開瑟琳", "凱瑟林", "凱薩林", "凱斯林"
+            )
+            for (h in catherineHomophones) {
+                s = s.replace(h, "catherine")
+            }
 
             // Simplified / variant Chinese normalization for "我需要你"
             s = s.replace("需要妳", "需要你")
