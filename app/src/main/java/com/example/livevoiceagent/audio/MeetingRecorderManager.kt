@@ -55,7 +55,7 @@ class MeetingRecorderManager(private val context: Context) {
 
     fun startRecording(): Result<File> = runCatching {
         stopRecordingSilently()
-        val dir = File(context.cacheDir, "meeting_recordings").apply { mkdirs() }
+        val dir = File(context.filesDir, "meeting_recordings").apply { mkdirs() }
         val file = File(dir, "meeting_${System.currentTimeMillis()}.m4a")
         val mr = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             MediaRecorder(context)

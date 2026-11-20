@@ -339,7 +339,9 @@ fun MainScreen(
                         onUpdateSettings = { viewModel.updateSettings(it) },
                         onFetchModels = { viewModel.fetchModelsFromApis() },
                         onOpenMemoryHub = { showMemoryDialog = true },
-                        onOpenWakeWordDialog = { showWakeWordDialog = true }
+                        onOpenWakeWordDialog = { showWakeWordDialog = true },
+                        onExportBackupJson = { viewModel.exportAllSettingsAndMemoryJson() },
+                        onImportBackupJson = { json -> viewModel.importAllSettingsAndMemoryJson(json) }
                     )
                 } else {
                     CatherineOrbWorkspace(
@@ -353,6 +355,7 @@ fun MainScreen(
                         onTriggerTutorQuickAction = { viewModel.triggerTutorQuickAction(it) },
                         onToggleCall = onRequestMicPermissionAndToggleCall,
                         onToggleMeetingRecording = { viewModel.toggleMeetingRecording() },
+                        onRetryFailedMeeting = { viewModel.retryFailedMeetingTranscription() },
                         onImportAudioUri = { uri -> viewModel.importAndTranscribeAudioUri(uri) },
                         onToggleMute = { viewModel.toggleMute() },
                         onToggleSpeaker = { viewModel.toggleSpeakerphone() },
@@ -512,7 +515,7 @@ private fun RikkaStyleNavigationDrawerSheet(
     val sdf = remember { SimpleDateFormat("MM/dd HH:mm", Locale.getDefault()) }
 
     ModalDrawerSheet(
-        drawerContainerColor = Color(0xFF0B111E),
+        drawerContainerColor = Color(0xFF05070B),
         drawerContentColor = Color(0xFFF8FAFC),
         modifier = Modifier.width(315.dp)
     ) {
@@ -1847,7 +1850,7 @@ private fun TutorNotebookDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = Color(0xFF111827),
+        containerColor = Color(0xFF090D16),
         titleContentColor = Color.White,
         textContentColor = Color(0xFFE2E8F0),
         title = {
@@ -2042,7 +2045,7 @@ private fun CustomGlossaryAndPromptDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = Color(0xFF111827),
+        containerColor = Color(0xFF090D16),
         titleContentColor = Color.White,
         textContentColor = Color(0xFFE2E8F0),
         title = {
@@ -2821,7 +2824,7 @@ private fun VisionInputDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = Color(0xFF111827),
+        containerColor = Color(0xFF090D16),
         titleContentColor = Color.White,
         textContentColor = Color(0xFFE2E8F0),
         title = {
@@ -4468,7 +4471,7 @@ private fun LongTermMemoryDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = Color(0xFF111827),
+        containerColor = Color(0xFF090D16),
         titleContentColor = Color.White,
         textContentColor = Color(0xFFE2E8F0),
         title = {
@@ -4628,7 +4631,7 @@ private fun WakeWordAndVoiceprintDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = Color(0xFF111827),
+        containerColor = Color(0xFF090D16),
         titleContentColor = Color.White,
         textContentColor = Color(0xFFE2E8F0),
         title = {

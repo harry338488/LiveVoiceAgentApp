@@ -77,6 +77,7 @@ internal fun CatherineOrbWorkspace(
     onTriggerTutorQuickAction: (String) -> Unit,
     onToggleCall: () -> Unit,
     onToggleMeetingRecording: () -> Unit,
+    onRetryFailedMeeting: () -> Unit,
     onImportAudioUri: (Uri) -> Unit,
     onToggleMute: () -> Unit,
     onToggleSpeaker: () -> Unit,
@@ -291,6 +292,26 @@ internal fun CatherineOrbWorkspace(
                             }
                         }
 
+                        // If a prior meeting transcription failed due to network drop, show one-tap Retry chip!
+                        if (!uiState.failedMeetingAudioPath.isNullOrBlank() && !uiState.isTranscribingMeeting) {
+                            Surface(
+                                shape = RoundedCornerShape(50),
+                                color = CatherineAmber.copy(alpha = 0.2f),
+                                border = BorderStroke(1.dp, CatherineAmber),
+                                modifier = Modifier
+                                    .padding(bottom = 8.dp)
+                                    .clickable { onRetryFailedMeeting() }
+                            ) {
+                                Text(
+                                    text = "🔄 重試轉寫剛才已保存的錄音檔",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = Color(0xFFFDE68A),
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 7.dp)
+                                )
+                            }
+                        }
+
                         // Sleek Action Row above dock: In-call Live Camera OR Meeting Recorder + Swipe-Up Transcript Handle
                         Row(
                             modifier = Modifier.padding(bottom = 14.dp),
@@ -459,6 +480,39 @@ internal fun CatherineOrbWorkspace(
                                         onOpenMapPreview = onOpenMapPreview,
                                         onPlayVoiceClip = onPlayMessageVoiceClip,
                                         onSaveToNotebook = { onSaveMessageToNotebook(msg) }
+                                    )
+                                }
+                            }
+                        }
+
+                        // Silent Commute / Library Quick-Command Chips (no mic needed!)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 2.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            listOf(
+                                "☀️ 早安簡報" to "早安，請幫我播報今天的早安出門簡報",
+                                "📝 看待辦" to "幫我列出目前未完成的待辦清單",
+                                "📬 看通知" to "幫我看看剛剛有哪些最新手機通知",
+                                "🅿️ 找車" to "我的車停在哪裡？"
+                            ).forEach { (chipLabel, cmdText) ->
+                                Surface(
+                                    shape = RoundedCornerShape(50),
+                                    color = Color.White.copy(alpha = 0.06f),
+                                    border = BorderStroke(0.5.dp, Color.White.copy(alpha = 0.12f)),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clickable { onSendTypedMessage(cmdText) }
+                                ) {
+                                    Text(
+                                        text = chipLabel,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color(0xFFCBD5E1),
+                                        textAlign = TextAlign.Center,
+                                        maxLines = 1,
+                                        modifier = Modifier.padding(vertical = 5.dp)
                                     )
                                 }
                             }

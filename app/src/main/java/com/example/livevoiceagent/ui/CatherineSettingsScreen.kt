@@ -39,7 +39,9 @@ internal fun CatherineSettingsScreen(
     onUpdateSettings: (AppSettings) -> Unit,
     onFetchModels: () -> Unit,
     onOpenMemoryHub: () -> Unit,
-    onOpenWakeWordDialog: () -> Unit
+    onOpenWakeWordDialog: () -> Unit,
+    onExportBackupJson: () -> String,
+    onImportBackupJson: (String) -> Boolean
 ) {
     val s = uiState.settings
     val scrollState = rememberScrollState()
@@ -409,6 +411,73 @@ internal fun CatherineSettingsScreen(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text("還原 Catherine 最新預設系統指令", color = Color(0xFFE2E8F0))
+            }
+
+            // One-Tap Backup & Restore JSON
+            val localCtx = androidx.compose.ui.platform.LocalContext.current
+            var showRestoreDialog by remember { mutableStateOf(false) }
+            var restoreJsonInput by remember { mutableStateOf("") }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedButton(
+                    onClick = {
+                        val json = onExportBackupJson()
+                        copyToClipboard(localCtx, "Catherine Backup JSON", json)
+                        android.widget.Toast.makeText(localCtx, "💾 已將完整設定與記憶備份複製到剪貼簿！", android.widget.Toast.LENGTH_LONG).show()
+                    },
+                    border = BorderStroke(1.dp, SettingsAccentCyan.copy(alpha = 0.5f)),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("💾 複製備份", color = SettingsAccentCyan)
+                }
+                OutlinedButton(
+                    onClick = {
+                        restoreJsonInput = ""
+                        showRestoreDialog = true
+                    },
+                    border = BorderStroke(1.dp, SettingsAccentViolet.copy(alpha = 0.5f)),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("📥 還原備份", color = Color(0xFFE9D5FF))
+                }
+            }
+            if (showRestoreDialog) {
+                AlertDialog(
+                    onDismissRequest = { showRestoreDialog = false },
+                    containerColor = Color(0xFF0B0F17),
+                    titleContentColor = Color.White,
+                    textContentColor = Color(0xFFE2E8F0),
+                    title = { Text("📥 貼上 Catherine 備份 JSON", fontWeight = FontWeight.Bold) },
+                    text = {
+                        OutlinedTextField(
+                            value = restoreJsonInput,
+                            onValueChange = { restoreJsonInput = it },
+                            placeholder = { Text("貼上先前複製的備份 JSON 內容…") },
+                            minLines = 4,
+                            maxLines = 8,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    },
+                    confirmButton = {
+                        Button(
+                            onClick = {
+                                if (onImportBackupJson(restoreJsonInput)) {
+                                    showRestoreDialog = false
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = SettingsAccentCyan, contentColor = Color(0xFF05070B))
+                        ) {
+                            Text("立即還原", fontWeight = FontWeight.Bold)
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showRestoreDialog = false }) { Text("取消", color = Color(0xFF94A3B8)) }
+                    }
+                )
             }
         }
 

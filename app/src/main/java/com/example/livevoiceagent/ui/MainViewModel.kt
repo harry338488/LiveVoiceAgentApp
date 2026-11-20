@@ -62,6 +62,7 @@ data class UiState(
     val meetingRecordingSeconds: Int = 0,
     val isTranscribingMeeting: Boolean = false,
     val meetingProgressMessage: String = "",
+    val failedMeetingAudioPath: String? = null,
     val errorToast: String? = null
 )
 
@@ -405,11 +406,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
             wakeWordManager.stopStandby()
             val res = meetingRecorder.startRecording()
             res.onSuccess {
+                startMeetingForegroundService()
                 _uiState.update {
                     it.copy(
                         isMeetingRecording = true,
                         meetingRecordingSeconds = 0,
-                        statusBanner = "🎙️ 會議錄音中（純本機零流量 · 結束後以 gpt-transcribe 轉寫摘要）"
+                        failedMeetingAudioPath = null,
+                        statusBanner = "🎙️ 會議錄音中（前景防殺保護 · 純本機零流量）"
                     )
                 }
                 meetingTimerJob?.cancel()
@@ -426,6 +429,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
             meetingTimerJob?.cancel()
             meetingTimerJob = null
             val recordedFile = meetingRecorder.stopRecording()
+            stopMeetingForegroundServiceIfNotWakeStandby()
             val durSec = _uiState.value.meetingRecordingSeconds
             _uiState.update {
                 it.copy(
@@ -521,9 +525,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
                         _uiState.update { it.copy(meetingProgressMessage = msg, statusBanner = msg) }
                     }
                 )
-                if (deleteSourceAfter) runCatching { audioFile.delete() }
 
                 transRes.onSuccess { (transcript, detectedSec) ->
+                    // Only delete the recording file AFTER transcription succeeds so nothing is ever lost!
+                    if (deleteSourceAfter) runCatching { audioFile.delete() }
+                    _uiState.update { it.copy(failedMeetingAudioPath = null) }
                     val durSec = if (detectedSec > 0) detectedSec else fallbackDurationSec
                     val durMin = (durSec / 60.0).coerceAtLeast(0.1)
                     val durLabel = if (durSec >= 3600) {
@@ -618,8 +624,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
                         it.copy(
                             isTranscribingMeeting = false,
                             meetingProgressMessage = "",
-                            statusBanner = "錄音轉寫失敗",
-                            errorToast = "gpt-transcribe 轉寫失敗：${err.message}"
+                            failedMeetingAudioPath = if (audioFile.exists()) audioFile.absolutePath else null,
+                            statusBanner = "轉寫失敗（錄音檔已安全保留，可點擊重試）",
+                            errorToast = "轉寫失敗（音檔已安全保留未刪除，可按重試）：${err.message}"
                         )
                     }
                 }
@@ -628,10 +635,109 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
                     it.copy(
                         isTranscribingMeeting = false,
                         meetingProgressMessage = "",
-                        errorToast = "音檔處理錯誤：${e.message}"
+                        failedMeetingAudioPath = if (audioFile.exists()) audioFile.absolutePath else null,
+                        errorToast = "音檔處理錯誤（音檔已保留）：${e.message}"
                     )
                 }
             }
+        }
+    }
+
+    fun retryFailedMeetingTranscription() {
+        val path = _uiState.value.failedMeetingAudioPath ?: return
+        val f = java.io.File(path)
+        if (!f.exists()) {
+            _uiState.update { it.copy(failedMeetingAudioPath = null, errorToast = "找不到先前的暫存錄音檔") }
+            return
+        }
+        _uiState.update {
+            it.copy(
+                isTranscribingMeeting = true,
+                meetingProgressMessage = "🔄 正在重試轉寫已保存的錄音檔…",
+                failedMeetingAudioPath = null
+            )
+        }
+        processRecordedOrImportedAudioFile(
+            audioFile = f,
+            sourceLabel = "重試會議錄音",
+            fallbackDurationSec = 0,
+            deleteSourceAfter = true
+        )
+    }
+
+    private fun startMeetingForegroundService() {
+        runCatching {
+            val appCtx = getApplication<Application>().applicationContext
+            val intent = Intent(appCtx, com.example.livevoiceagent.audio.WakeWordForegroundService::class.java).apply {
+                putExtra("service_mode", "meeting_recording")
+            }
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                appCtx.startForegroundService(intent)
+            } else {
+                appCtx.startService(intent)
+            }
+        }
+    }
+
+    private fun stopMeetingForegroundServiceIfNotWakeStandby() {
+        val s = _uiState.value.settings
+        if (s.wakeWordEnabled) {
+            wakeWordManager.startStandby(s)
+        } else {
+            runCatching {
+                val appCtx = getApplication<Application>().applicationContext
+                appCtx.stopService(Intent(appCtx, com.example.livevoiceagent.audio.WakeWordForegroundService::class.java))
+            }
+        }
+    }
+
+    fun exportAllSettingsAndMemoryJson(): String {
+        val s = _uiState.value.settings
+        return org.json.JSONObject().apply {
+            put("version", "2.3.0")
+            put("openAiApiKey", s.openAiApiKey)
+            put("xAiApiKey", s.xAiApiKey)
+            put("linkupApiKey", s.linkupApiKey)
+            put("googleMapsApiKey", s.googleMapsApiKey)
+            put("frontendVoiceModel", s.frontendVoiceModel)
+            put("backendBrainModel", s.backendBrainModel)
+            put("voiceName", s.voiceName)
+            put("linkupSearchDepth", s.linkupSearchDepth)
+            put("wakeWordPhrase", s.wakeWordPhrase)
+            put("wakeWordVoiceprintData", s.wakeWordVoiceprintData)
+            put("userMemoryProfile", s.userMemoryProfile)
+            put("savedPlaceAliases", s.savedPlaceAliases)
+            put("parkedCarInfoJson", s.parkedCarInfoJson)
+            put("todoItemsJson", s.todoItemsJson)
+        }.toString(2)
+    }
+
+    fun importAllSettingsAndMemoryJson(rawJson: String): Boolean {
+        return runCatching {
+            val obj = org.json.JSONObject(rawJson.trim())
+            val cur = _uiState.value.settings
+            val restored = cur.copy(
+                openAiApiKey = obj.optString("openAiApiKey", cur.openAiApiKey),
+                xAiApiKey = obj.optString("xAiApiKey", cur.xAiApiKey),
+                linkupApiKey = obj.optString("linkupApiKey", cur.linkupApiKey),
+                googleMapsApiKey = obj.optString("googleMapsApiKey", cur.googleMapsApiKey),
+                frontendVoiceModel = obj.optString("frontendVoiceModel", cur.frontendVoiceModel),
+                backendBrainModel = obj.optString("backendBrainModel", cur.backendBrainModel),
+                voiceName = obj.optString("voiceName", cur.voiceName),
+                linkupSearchDepth = obj.optString("linkupSearchDepth", cur.linkupSearchDepth),
+                wakeWordPhrase = obj.optString("wakeWordPhrase", cur.wakeWordPhrase),
+                wakeWordVoiceprintData = obj.optString("wakeWordVoiceprintData", cur.wakeWordVoiceprintData),
+                userMemoryProfile = obj.optString("userMemoryProfile", cur.userMemoryProfile),
+                savedPlaceAliases = obj.optString("savedPlaceAliases", cur.savedPlaceAliases),
+                parkedCarInfoJson = obj.optString("parkedCarInfoJson", cur.parkedCarInfoJson),
+                todoItemsJson = obj.optString("todoItemsJson", cur.todoItemsJson)
+            )
+            updateSettings(restored)
+            _uiState.update { it.copy(errorToast = "✅ 已成功還原 Catherine 備份設定與記憶！") }
+            true
+        }.getOrElse { err ->
+            _uiState.update { it.copy(errorToast = "備份還原失敗（JSON 格式不正確）：${err.message}") }
+            false
         }
     }
 

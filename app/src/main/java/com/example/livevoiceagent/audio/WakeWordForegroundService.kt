@@ -45,8 +45,9 @@ class WakeWordForegroundService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         acquireCpuWakeLock()
+        val mode = intent?.getStringExtra("service_mode") ?: "wake_word"
         val wakePhrase = intent?.getStringExtra("wake_phrase")?.takeIf { it.isNotBlank() } ?: "hey Catherine"
-        val notification = buildNotification(wakePhrase)
+        val notification = buildNotification(mode, wakePhrase)
         runCatching {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 startForeground(
@@ -61,15 +62,15 @@ class WakeWordForegroundService : Service() {
         return START_STICKY
     }
 
-    private fun buildNotification(wakePhrase: String): Notification {
+    private fun buildNotification(mode: String, wakePhrase: String): Notification {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "語音喚醒詞待命服務",
+                "Catherine 語音與錄音服務",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "在背景免費監聽您的專屬語音喚醒詞（不消耗 Live API 額度）"
+                description = "維持背景語音喚醒或長時段會議錄音不斷線"
                 setShowBadge(false)
             }
             nm.createNotificationChannel(channel)
@@ -85,10 +86,17 @@ class WakeWordForegroundService : Service() {
         }
         val pendingIntent = PendingIntent.getActivity(this, 0, openAppIntent, pendingFlags)
 
+        val isMeeting = mode == "meeting_recording"
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setContentTitle("🎧 語音喚醒待命中：「$wakePhrase」")
-            .setContentText("本地端免費聽音（0 API 費用）· 說出喚醒詞即可免動手開啟對話")
+            .setContentTitle(
+                if (isMeeting) "🔴 Catherine 會議錄音中（防中斷保護）"
+                else "🎧 Catherine 語音待命中：「$wakePhrase」"
+            )
+            .setContentText(
+                if (isMeeting) "純本機安全錄音（0 API 費用）· 鎖屏或切換 App 皆不中斷"
+                else "本地端免費聽音 · 說出喚醒詞即可免動手對話"
+            )
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setOngoing(true)
             .setContentIntent(pendingIntent)

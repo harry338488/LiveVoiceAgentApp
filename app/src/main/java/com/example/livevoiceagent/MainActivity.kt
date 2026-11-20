@@ -201,6 +201,15 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        if (action == ACTION_START_MEETING_RECORD) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED &&
+                !mainViewModel.uiState.value.isMeetingRecording
+            ) {
+                mainViewModel.toggleMeetingRecording()
+            }
+            return
+        }
+
         val isAssistAction = action == Intent.ACTION_ASSIST || action == Intent.ACTION_VOICE_COMMAND
         val isTalkShortcut = action == ACTION_START_VOICE_CHAT ||
                 (action == Intent.ACTION_VIEW && intent.data?.scheme == "livevoiceagent")
@@ -217,5 +226,6 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         const val ACTION_START_VOICE_CHAT = "com.example.livevoiceagent.START_VOICE_CHAT"
+        const val ACTION_START_MEETING_RECORD = "com.example.livevoiceagent.START_MEETING_RECORD"
     }
 }
