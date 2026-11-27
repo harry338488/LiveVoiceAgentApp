@@ -1048,34 +1048,36 @@ class LiveSessionManager(
                         delay(380)
                         val snapshot = conversationSnapshotProvider()
 
-                        val res = backendLlmClient.runDelegatedTask(
-                            settings = settings,
-                            conversationHistory = snapshot,
-                            taskHint = delegationHint,
-                            onThinkingStatusUpdate = { statusMsg ->
-                                runCatching {
-                                    webSocket.send(JSONObject().apply {
-                                        put("type", "session.thinking.append")
-                                        put("event_id", "think_${UUID.randomUUID().toString().take(8)}")
-                                        put("delegation_id", delegationId)
-                                        put("content", statusMsg)
-                                    }.toString())
+                        val res = withTimeoutOrNull(38_000L) {
+                            backendLlmClient.runDelegatedTask(
+                                settings = settings,
+                                conversationHistory = snapshot,
+                                taskHint = delegationHint,
+                                onThinkingStatusUpdate = { statusMsg ->
+                                    runCatching {
+                                        webSocket.send(JSONObject().apply {
+                                            put("type", "session.thinking.append")
+                                            put("event_id", "think_${UUID.randomUUID().toString().take(8)}")
+                                            put("delegation_id", delegationId)
+                                            put("content", statusMsg.take(180))
+                                        }.toString())
+                                    }
+                                },
+                                onSearchExecuted = { searchResult ->
+                                    listener.onSearchCardAdded(searchResult, turnIdx)
+                                },
+                                onCalendarActionLogged = { calNote ->
+                                    listener.onTranscriptDelta(
+                                        role = MessageRole.SYSTEM,
+                                        delta = calNote,
+                                        timelineMs = System.currentTimeMillis(),
+                                        modelTag = "Tools",
+                                        streamKey = "turn_${sessionEpochId}_${turnIdx}_cal_${UUID.randomUUID().toString().take(6)}",
+                                        turnIndex = turnIdx
+                                    )
                                 }
-                            },
-                            onSearchExecuted = { searchResult ->
-                                listener.onSearchCardAdded(searchResult, turnIdx)
-                            },
-                            onCalendarActionLogged = { calNote ->
-                                listener.onTranscriptDelta(
-                                    role = MessageRole.SYSTEM,
-                                    delta = calNote,
-                                    timelineMs = System.currentTimeMillis(),
-                                    modelTag = "Calendar",
-                                    streamKey = "turn_${sessionEpochId}_${turnIdx}_cal_${UUID.randomUUID().toString().take(6)}",
-                                    turnIndex = turnIdx
-                                )
-                            }
-                        )
+                            )
+                        } ?: Result.failure(IllegalStateException("後端搜尋逾時（38秒），請再試一次"))
                         res.onSuccess { brainResp ->
                             if (brainResp.detailedNotes.isNotBlank()) {
                                 listener.onTranscriptDelta(

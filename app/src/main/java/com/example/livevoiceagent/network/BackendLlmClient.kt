@@ -85,7 +85,12 @@ class BackendLlmClient(
                     )
                 }.getOrElse {
                     if (collectedSearches.isNotEmpty()) {
-                        collectedSearches.joinToString("\n\n") { it.answer.ifBlank { it.rawFormattedForLlm } }
+                        summarizeToolResultsFallback(
+                            baseUrl = baseUrl,
+                            apiKey = apiKey,
+                            taskHint = taskHint ?: "請整理以下搜尋結果",
+                            toolSummaries = collectedSearches.map { it.answer.ifBlank { it.rawFormattedForLlm } }
+                        )
                     } else {
                         runViaChatCompletionsApi(
                             baseUrl = baseUrl,
@@ -158,26 +163,20 @@ class BackendLlmClient(
         onSearchExecuted: (LinkupSearchResult) -> Unit,
         onCalendarActionLogged: (String) -> Unit
     ): String {
-        val inputArr = JSONArray()
+        val initialInputArr = JSONArray()
         conversationHistory
             .filter { it.role == MessageRole.USER || it.role == MessageRole.ASSISTANT_VOICE }
-            .takeLast(14)
+            .takeLast(8)
             .forEach { msg ->
                 val isUser = msg.role == MessageRole.USER
-                val text = buildString {
-                    if (msg.text.isNotBlank()) append(msg.text.trim())
-                    if (msg.backendThinkingText.isNotBlank()) {
-                        if (isNotEmpty()) append("\n")
-                        append(msg.backendThinkingText.trim())
-                    }
-                }.trim()
+                val text = msg.text.trim()
                 if (text.isNotEmpty()) {
-                    inputArr.put(JSONObject().apply {
+                    initialInputArr.put(JSONObject().apply {
                         put("type", "message")
                         put("role", if (isUser) "user" else "assistant")
                         put("content", JSONArray().put(JSONObject().apply {
                             put("type", if (isUser) "input_text" else "output_text")
-                            put("text", text.take(1500))
+                            put("text", text.take(600))
                         }))
                     })
                 }
@@ -188,7 +187,7 @@ class BackendLlmClient(
             if (!taskHint.isNullOrBlank()) {
                 contentParts.put(JSONObject().apply {
                     put("type", "input_text")
-                    put("text", taskHint)
+                    put("text", taskHint.take(2000))
                 })
             } else {
                 contentParts.put(JSONObject().apply {
@@ -203,7 +202,7 @@ class BackendLlmClient(
                     put("image_url", dataUrl)
                 })
             }
-            inputArr.put(JSONObject().apply {
+            initialInputArr.put(JSONObject().apply {
                 put("type", "message")
                 put("role", "user")
                 put("content", contentParts)
@@ -226,12 +225,17 @@ class BackendLlmClient(
 
         var finalText = ""
         val executedToolSummaries = mutableListOf<String>()
+        var previousResponseId: String? = null
+        var nextRoundInput: JSONArray = initialInputArr
 
         for (round in 0 until 4) {
             val payload = JSONObject().apply {
                 put("model", model)
                 put("instructions", systemInstructions)
-                put("input", inputArr)
+                put("input", nextRoundInput)
+                if (!previousResponseId.isNullOrBlank()) {
+                    put("previous_response_id", previousResponseId)
+                }
                 if (round < 3 && toolsArr.length() > 0) {
                     put("tools", toolsArr)
                     put("tool_choice", "auto")
@@ -249,17 +253,24 @@ class BackendLlmClient(
                 httpClient.newCall(req).execute().use { resp ->
                     val body = resp.body?.string() ?: ""
                     if (!resp.isSuccessful) {
-                        throw IllegalStateException("Responses API HTTP ${resp.code}: ${body.take(200)}")
+                        throw IllegalStateException("Responses API HTTP ${resp.code}: ${body.take(220)}")
                     }
                     JSONObject(body)
                 }
             }.getOrElse { err ->
-                // If tools already succeeded in an earlier round, never discard their results or fail the delegation!
+                // If tools (e.g. Linkup search) already succeeded in an earlier round, summarize cleanly via gpt-4o instead of failing!
                 if (executedToolSummaries.isNotEmpty()) {
-                    return executedToolSummaries.joinToString("\n\n")
+                    return summarizeToolResultsFallback(
+                        baseUrl = baseUrl,
+                        apiKey = apiKey,
+                        taskHint = taskHint ?: "請整理以下查詢結果",
+                        toolSummaries = executedToolSummaries
+                    )
                 }
                 throw err
             }
+
+            previousResponseId = respJson.optString("id", "").takeIf { it.isNotBlank() }
 
             val outputArr = respJson.optJSONArray("output") ?: JSONArray()
             val functionCalls = mutableListOf<JSONObject>()
@@ -268,13 +279,8 @@ class BackendLlmClient(
             for (i in 0 until outputArr.length()) {
                 val item = outputArr.optJSONObject(i) ?: continue
                 when (item.optString("type")) {
-                    "reasoning" -> {
-                        // Preserve reasoning items in inputArr so function_call items never fail validation
-                        inputArr.put(item)
-                    }
                     "function_call" -> {
                         functionCalls.add(item)
-                        inputArr.put(item)
                     }
                     "message" -> {
                         val contentArr = item.optJSONArray("content")
@@ -297,6 +303,7 @@ class BackendLlmClient(
                 break
             }
 
+            val roundToolOutputs = JSONArray()
             for (fc in functionCalls) {
                 val callId = fc.optString("call_id", "")
                 val fnName = fc.optString("name", "")
@@ -307,7 +314,7 @@ class BackendLlmClient(
                     fnName == "linkup_web_search" -> {
                         val query = argsJson.optString("query", taskHint ?: "")
                         val depth = argsJson.optString("depth", settings.linkupSearchDepth)
-                        onThinkingStatusUpdate("正在透過 Linkup 搜尋最新資料：「$query」，若使用者說話請自然陪他聊天...")
+                        onThinkingStatusUpdate("正在搜尋最新資料：「$query」...")
                         val searchRes = linkupClient.search(
                             apiKey = settings.linkupApiKey,
                             query = query,
@@ -322,9 +329,11 @@ class BackendLlmClient(
                         }
                         collectedSearches.add(searchRes)
                         onSearchExecuted(searchRes)
-                        executedToolSummaries.add(searchRes.answer.ifBlank { searchRes.rawFormattedForLlm })
-                        onThinkingStatusUpdate("已完成 Linkup 搜尋「$query」，後端模型 $model 正在整理重點...")
-                        searchRes.rawFormattedForLlm
+                        if (searchRes.sources.isNotEmpty() || !searchRes.answer.startsWith("搜尋失敗")) {
+                            executedToolSummaries.add(searchRes.answer.ifBlank { searchRes.rawFormattedForLlm })
+                        }
+                        onThinkingStatusUpdate("已完成搜尋「$query」，正在整理重點...")
+                        searchRes.rawFormattedForLlm.take(3000)
                     }
 
                     CalendarToolManager.CALENDAR_TOOL_NAMES.contains(fnName) -> {
@@ -332,11 +341,11 @@ class BackendLlmClient(
                         val calRes = calendarToolManager.executeCalendarTool(fnName, argsJson)
                         onCalendarActionLogged("📅 行事曆操作 (`$fnName`):\n$calRes")
                         executedToolSummaries.add(calRes)
-                        calRes
+                        calRes.take(2500)
                     }
 
                     LocationMapsToolManager.LOCATION_MAPS_TOOL_NAMES.contains(fnName) -> {
-                        onThinkingStatusUpdate("正在讀取手機 GPS 定位 / 結合 Linkup 搜尋周邊 / 規劃 Google Maps 導航 ($fnName)...")
+                        onThinkingStatusUpdate("正在執行手機定位／導航／系統工具 ($fnName)...")
                         val locRes = locationMapsToolManager.executeLocationOrMapTool(
                             toolName = fnName,
                             argsJson = argsJson,
@@ -362,24 +371,53 @@ class BackendLlmClient(
                         } else {
                             executedToolSummaries.add(locRes.actionLogText)
                         }
-                        locRes.toolOutputJson
+                        locRes.toolOutputJson.take(3000)
                     }
 
                     else -> "{\"status\":\"error\",\"message\":\"Unsupported tool: $fnName\"}"
                 }
 
-                val outObj = JSONObject().apply {
+                roundToolOutputs.put(JSONObject().apply {
                     put("type", "function_call_output")
                     put("call_id", callId)
                     put("output", toolOutput)
-                }
-                inputArr.put(outObj)
+                })
             }
+            nextRoundInput = roundToolOutputs
         }
         if (finalText.isBlank() && executedToolSummaries.isNotEmpty()) {
-            finalText = executedToolSummaries.joinToString("\n\n")
+            finalText = summarizeToolResultsFallback(
+                baseUrl = baseUrl,
+                apiKey = apiKey,
+                taskHint = taskHint ?: "請整理以下查詢結果",
+                toolSummaries = executedToolSummaries
+            )
         }
         return finalText
+    }
+
+    private fun summarizeToolResultsFallback(
+        baseUrl: String,
+        apiKey: String,
+        taskHint: String,
+        toolSummaries: List<String>
+    ): String {
+        val rawJoined = toolSummaries.joinToString("\n\n").take(3500)
+        return runCatching {
+            val msgs = JSONArray().apply {
+                put(JSONObject().apply {
+                    put("role", "system")
+                    put("content", "你是 Catherine 的後端資料整理專家。請根據以下搜尋／工具回傳的真實資料，用簡潔、自然、口語化的台灣繁體中文直接回答使用者的問題（3～6 句重點即可）。")
+                })
+                put(JSONObject().apply {
+                    put("role", "user")
+                    put("content", "使用者問題：$taskHint\n\n查詢資料：\n$rawJoined")
+                })
+            }
+            val resp = callChatCompletions(baseUrl, apiKey, "gpt-4o-mini", msgs, null)
+            resp.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message")?.optString("content", "")
+                ?.trim()?.takeIf { it.isNotBlank() } ?: rawJoined
+        }.getOrDefault(rawJoined)
     }
 
     private suspend fun runViaChatCompletionsApi(

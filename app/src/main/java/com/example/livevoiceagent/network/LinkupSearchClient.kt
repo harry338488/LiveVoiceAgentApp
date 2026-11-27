@@ -78,7 +78,9 @@ class LinkupSearchClient {
             put("q", query)
             put("depth", depth)
             put("outputType", outputType)
-            if (outputType == "sourcedAnswer") {
+            if (outputType == "searchResults") {
+                put("maxResults", 5)
+            } else if (outputType == "sourcedAnswer") {
                 put("includeInlineCitations", true)
             }
         }
@@ -131,10 +133,10 @@ class LinkupSearchClient {
             LinkupSearchResult(
                 query = query,
                 answer = answer.ifBlank {
-                    sourcesList.take(4).joinToString("\n\n") { "• ${it.title}: ${it.snippet.take(200)}" }
+                    sourcesList.take(4).joinToString("\n\n") { "• ${it.title}: ${it.snippet.take(180)}" }
                 },
                 sources = sourcesList,
-                rawFormattedForLlm = llmBuilder.toString().ifBlank { "查無相關結果。" }
+                rawFormattedForLlm = llmBuilder.toString().take(2800).ifBlank { "查無相關結果。" }
             )
         }
     }
