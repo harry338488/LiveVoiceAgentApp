@@ -111,13 +111,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
         context = application.applicationContext,
         onTriplePressDetected = {
             if (_uiState.value.settings.powerButtonTriplePressEnabled &&
-                _uiState.value.connectionState == ConnectionState.DISCONNECTED
+                _uiState.value.connectionState == ConnectionState.DISCONNECTED &&
+                !_uiState.value.isMeetingRecording
             ) {
                 wakeWordManager.playWakeChimeAndVibrate()
                 runCatching {
                     val appCtx = getApplication<Application>().applicationContext
                     val openIntent = Intent(appCtx, MainActivity::class.java).apply {
-                        action = MainActivity.ACTION_START_VOICE_CHAT
                         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
                     }
                     appCtx.startActivity(openIntent)
@@ -751,6 +751,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
     }
 
     fun startLiveCall(isWakeWordSession: Boolean = false) {
+        if (_uiState.value.isMeetingRecording) {
+            _uiState.update { it.copy(errorToast = "🎙️ 目前正在進行會議錄音，請先結束錄音再開啟語音通話") }
+            return
+        }
         pendingAutoHangupJob?.cancel()
         wakeWordManager.stopStandby()
         val state = _uiState.value
@@ -1259,7 +1263,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), L
                             role = MessageRole.SYSTEM,
                             delta = calNote,
                             timelineMs = System.currentTimeMillis(),
-                            modelTag = "Android Calendar",
+                            modelTag = "Tools",
                             streamKey = "offline_cal_${offlineTurnIdx}",
                             turnIndex = offlineTurnIdx
                         )

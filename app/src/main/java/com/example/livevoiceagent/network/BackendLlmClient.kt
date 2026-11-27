@@ -187,7 +187,7 @@ class BackendLlmClient(
             if (!taskHint.isNullOrBlank()) {
                 contentParts.put(JSONObject().apply {
                     put("type", "input_text")
-                    put("text", taskHint.take(2000))
+                    put("text", taskHint.take(14_000))
                 })
             } else {
                 contentParts.put(JSONObject().apply {
@@ -445,20 +445,14 @@ class BackendLlmClient(
 
         conversationHistory
             .filter { it.role == MessageRole.USER || it.role == MessageRole.ASSISTANT_VOICE }
-            .takeLast(14)
+            .takeLast(8)
             .forEach { msg ->
                 val roleStr = if (msg.role == MessageRole.USER) "user" else "assistant"
-                val text = buildString {
-                    if (msg.text.isNotBlank()) append(msg.text.trim())
-                    if (msg.backendThinkingText.isNotBlank()) {
-                        if (isNotEmpty()) append("\n")
-                        append(msg.backendThinkingText.trim())
-                    }
-                }.trim()
+                val text = msg.text.trim()
                 if (text.isNotEmpty()) {
                     messagesArr.put(JSONObject().apply {
                         put("role", roleStr)
-                        put("content", text)
+                        put("content", text.take(600))
                     })
                 }
             }
